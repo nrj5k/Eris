@@ -91,18 +91,17 @@ impl<B: Backend> CombinedModel<B> {
         tier_selector: &TierSelector,
         epsilon: f32,
     ) -> usize {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
-        if rng.gen::<f32>() < epsilon {
+        if rng.random::<f32>() < epsilon {
             // Exploration: random action
-            rng.gen_range(0..self.qnetwork.action_dim)
+            rng.random_range(0..10)
         } else {
             // Exploitation: use model predictions
             let (_, importance, q_values) = self.forward(state);
 
-            // Get importance score as scalar
-            let importance_data = importance.into_data();
-            let importance_val = importance_data.value[0].elem::<f32>();
+            // Get importance score as scalar (batch_size=1, output_dim=1)
+            let importance_val: f32 = importance.into_data().convert::<f32>().value[0];
 
             // Map importance to tier via capacity-weighted distribution
             let tier_idx = tier_selector.select_tier(importance_val);
@@ -118,11 +117,10 @@ impl<B: Backend> CombinedModel<B> {
             let argmax_idx = tier_q_values.argmax(1);
 
             // Convert to scalar
-            let op_idx_data = argmax_idx.into_data();
-            let op_idx = op_idx_data.value[0].elem::<i64>() as usize;
+            let op_idx: i64 = argmax_idx.into_data().convert::<i64>().value[0];
 
             // Encode action: tier * 2 + op
-            tier_idx * 2 + op_idx
+            tier_idx * 2 + op_idx as usize
         }
     }
 }

@@ -31,6 +31,11 @@ pub struct QNetwork<B: Backend> {
     advantage_fc2: Linear<B>,
 
     activation: Relu,
+
+    // Store dimensions
+    input_dim: usize,
+    hidden_dim: usize,
+    action_dim: usize,
 }
 
 #[derive(Config, Debug)]
@@ -78,6 +83,10 @@ impl QNetworkConfig {
                 .init(device),
 
             activation: Relu::new(),
+
+            input_dim: self.input_dim,
+            hidden_dim: self.hidden_dim,
+            action_dim: self.action_dim,
         }
     }
 }
