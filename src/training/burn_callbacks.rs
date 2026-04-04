@@ -165,7 +165,11 @@ impl RewardTrackingCallback {
     pub fn average_reward(&self) -> f32 {
         let sum = *self.sum.lock().unwrap();
         let count = *self.count.lock().unwrap();
-        if count > 0 { sum / count as f32 } else { 0.0 }
+        if count > 0 {
+            sum / count as f32
+        } else {
+            0.0
+        }
     }
 
     /// Get total reward

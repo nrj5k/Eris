@@ -1,4 +1,4 @@
-use crate::config::TierConfig;
+use crate::config_old::TierConfig;
 use crate::features::tracker::AccessTracker;
 use crate::trace::BlobData;
 

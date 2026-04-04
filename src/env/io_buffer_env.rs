@@ -1,4 +1,4 @@
-use crate::config::TierConfig;
+use crate::config_old::TierConfig;
 use crate::env::{Environment, Info, StepResult};
 use crate::error::{EnvError, Result};
 use crate::features::{AccessRecord, AccessTracker, BlobFeatures, HotnessConfig};

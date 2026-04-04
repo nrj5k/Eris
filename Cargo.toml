@@ -3,9 +3,19 @@ name = "eris"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["cpu"]
+cpu = []
+gpu = []
+torch = ["burn/tch"]
+cuda = ["burn/cuda"]
+rocm = ["burn/rocm"]
+vulkan = ["burn/vulkan"]
+
 [dependencies]
 postcard = { version = "1.1", features = ["alloc", "use-crc"] }
-burn = { version = "0.20.1", features = ["wgpu", "autodiff", "train", "ndarray"] }
+burn = { version = "0.21.0-pre.2", features = ["wgpu", "autodiff", "train", "ndarray"] }
+burn-rl = "0.21.0-pre.2"
 chrono = "0.4.44"
 clap = { version = "4", features = ["derive"] }
 csv = "1.4.0"
@@ -28,3 +38,4 @@ toml = "1.1"
 approx = "0.5.1"
 criterion = "0.8.2"
 proptest = "1.11.0"
+tempfile = "3.20"

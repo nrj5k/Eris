@@ -32,7 +32,7 @@ use burn::tensor::{Int, Tensor, TensorData};
 use std::path::Path;
 
 use crate::models::{CombinedModel, CombinedModelConfig};
-use crate::training::checkpoint::CheckpointMetadata;
+use crate::training::checkpoint::{CheckpointMetadata, DQNCheckpointHelper};
 use crate::training::replay_buffer::{ReplayBuffer, TransitionBatch};
 
 /// Training configuration
@@ -269,7 +269,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         tracing::debug!("Target network updated (hard reset)");
     }
 
-    /// Save model checkpoint
+    /// Save model checkpoint using Burn's recorder with DQN metadata.
     ///
     /// # Arguments
     /// * `path` - Path prefix (extensions added automatically)
@@ -278,33 +278,31 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
     ///
     /// # Returns
     /// Ok(()) on success, Err on failure
+    ///
+    /// # File Naming Convention
+    ///
+    /// Creates the following files:
+    /// - `{path}-{episode}.mpk` - Policy network checkpoint
+    /// - `{path}-{episode}.json` - Policy network metadata
+    /// - `{path}_target-{episode}.mpk` - Target network checkpoint
+    /// - `{path}_target-{epoch}.json` - Target network metadata
+    ///
+    /// Note: Uses underscore separator for target network to avoid issues with filesystem extensions.
     pub fn save_checkpoint<P: AsRef<Path>>(
         &self,
         path: P,
         episode: usize,
         avg_reward: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        // Extract directory and name from path
+        let directory = path.as_ref().parent().unwrap_or(Path::new("."));
+        let name = path
+            .as_ref()
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("model");
 
-        // Create directory if needed
-        if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        // Save policy network
-        self.model
-            .clone()
-            .save_file(path.as_ref(), &recorder)
-            .map_err(|e| format!("Failed to save model: {:?}", e))?;
-
-        // Save target network
-        let target_path = format!("{}.target.mpk", path.as_ref().display());
-        self.target_model
-            .clone()
-            .save_file(&target_path, &recorder)
-            .map_err(|e| format!("Failed to save target: {:?}", e))?;
-
-        // Save metadata
+        // Save policy network using Burn's recorder
         let metadata = CheckpointMetadata::new(
             episode,
             self.step_count,
@@ -313,15 +311,22 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             avg_reward,
         );
 
-        let meta_path = format!("{}.json", path.as_ref().display());
-        let json = serde_json::to_string_pretty(&metadata)?;
-        std::fs::write(&meta_path, json)?;
+        DQNCheckpointHelper::save(&self.model, directory, name, episode, &metadata)?;
 
-        tracing::info!("Checkpoint saved to {}", path.as_ref().display());
+        // Also save target network (use underscore instead of dot for filename)
+        let target_name = format!("{}_target", name);
+        DQNCheckpointHelper::save(
+            &self.target_model,
+            directory,
+            &target_name,
+            episode,
+            &metadata,
+        )?;
+
         Ok(())
     }
 
-    /// Load model checkpoint
+    /// Load model checkpoint using Burn's recorder with DQN metadata.
     ///
     /// # Arguments
     /// * `path` - Path prefix (extensions added automatically)
@@ -337,30 +342,29 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         model_config: CombinedModelConfig,
         device: B::Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        // Extract directory and name from path
+        let directory = path.as_ref().parent().unwrap_or(Path::new("."));
+        let name = path
+            .as_ref()
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("model");
 
-        // Load policy network
-        let model = model_config.init(&device);
-        let model = model
-            .load_file(path.as_ref(), &recorder, &device)
-            .map_err(|e| format!("Failed to load model: {:?}", e))?;
+        // Load policy network using Burn's recorder
+        let (model, _metadata) = DQNCheckpointHelper::load(
+            directory,
+            name,
+            0, // Use epoch 0 for single checkpoint
+            &device,
+            || model_config.init(&device),
+        )?;
 
-        // Load target network
-        let target_path = format!("{}.target.mpk", path.as_ref().display());
-        let target_model = model_config.init(&device);
-        let target_model = target_model
-            .load_file(&target_path, &recorder, &device)
-            .map_err(|e| format!("Failed to load target: {:?}", e))?;
-
-        // Load metadata
-        let meta_path = format!("{}.json", path.as_ref().display());
-        let metadata = if std::path::Path::new(&meta_path).exists() {
-            let json = std::fs::read_to_string(&meta_path)?;
-            serde_json::from_str(&json)?
-        } else {
-            tracing::warn!("No checkpoint metadata found, using defaults");
-            CheckpointMetadata::default()
-        };
+        // Load target network (use underscore instead of dot for filename)
+        let target_name = format!("{}_target", name);
+        let (target_model, metadata) =
+            DQNCheckpointHelper::load(directory, &target_name, 0, &device, || {
+                model_config.init(&device)
+            })?;
 
         Ok(Self {
             model,

@@ -66,7 +66,7 @@ impl TierSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TierConfig;
+    use crate::config_old::TierConfig;
 
     fn test_tier(id: u32, capacity: f64, name: &str) -> Tier {
         Tier::new(TierConfig {

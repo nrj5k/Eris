@@ -378,15 +378,11 @@ mod tests {
 
     /// Helper to create a minimal metadata for tests
     fn dummy_metadata() -> MetricMetadata {
-        // Create minimal progress info
+        // Burn 0.21 requires all fields
         MetricMetadata {
-            progress: Progress {
-                items_processed: 0,
-                items_total: 0,
-            },
-            epoch: 0,
-            epoch_total: 0,
-            iteration: 0,
+            progress: Progress::new(0, 0),
+            global_progress: Progress::new(0, 0),
+            iteration: Some(0),
             lr: None,
         }
     }

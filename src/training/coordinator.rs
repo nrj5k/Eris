@@ -1,6 +1,5 @@
 use crate::env::Environment;
 use crate::tier::TierSelector;
-use crate::training::monitor::TrainingMonitor;
 use crate::training::{CombinedAgent, Transition};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Tensor, TensorData};
@@ -52,7 +51,6 @@ pub struct TrainingResult {
 /// * `agent` - Combined agent with model and replay buffer
 /// * `num_episodes` - Number of episodes to train
 /// * `tier_selector` - Tier selector for action selection
-/// * `monitor` - Optional training monitor for callbacks
 ///
 /// # Returns
 ///
@@ -60,7 +58,7 @@ pub struct TrainingResult {
 ///
 /// # Training Process
 ///
-/// The function implements the following流程:
+/// The function implements the following workflow:
 ///
 /// 1. **Episode Loop**: Run specified number of episodes
 /// 2. **Step Loop**: Within each episode, take actions until done
@@ -73,7 +71,7 @@ pub struct TrainingResult {
 ///
 /// ```
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use eris::training::{train_agent, CombinedAgent, TrainingConfig, ConsoleMonitor};
+/// use eris::training::{train_agent, CombinedAgent, TrainingConfig};
 /// use eris::env::Environment;
 /// use eris::tier::TierSelector;
 ///
@@ -91,23 +89,17 @@ pub struct TrainingResult {
 /// # let mut agent = CombinedAgent::new(training_config, model_config, device);
 /// # let tier_selector = TierSelector::new(vec![]);
 ///
-/// // Train agent with monitor
-/// let mut monitor = ConsoleMonitor::new(10);
-/// let result = train_agent(&mut env, &mut agent, 10, &tier_selector, Some(&mut monitor));
+/// // Train agent
+/// let result = train_agent(&mut env, &mut agent, 10, &tier_selector);
 /// println!("Trained for {} episodes", result.episode_rewards.len());
 /// # Ok(())
 /// # }
 /// ```
-pub fn train_agent<
-    B: AutodiffBackend,
-    E: Environment<Observation = Vec<f64>, Action = usize>,
-    M: TrainingMonitor,
->(
+pub fn train_agent<B: AutodiffBackend, E: Environment<Observation = Vec<f64>, Action = usize>>(
     env: &mut E,
     agent: &mut CombinedAgent<B>,
     num_episodes: usize,
     tier_selector: &TierSelector,
-    monitor: Option<&mut M>,
 ) -> TrainingResult {
     // Early return if no episodes to train
     if num_episodes == 0 {
@@ -120,13 +112,8 @@ pub fn train_agent<
 
     let mut episode_rewards = Vec::with_capacity(num_episodes);
     let mut losses = Vec::new();
-    let mut monitor = monitor;
 
     for episode in 0..num_episodes {
-        if let Some(m) = monitor.as_mut() {
-            m.on_episode_start(episode, num_episodes);
-        }
-
         let mut total_reward = 0.0;
         let mut done = false;
         let mut state = env.reset();
@@ -167,11 +154,6 @@ pub fn train_agent<
                 if let Some(batch) = agent.buffer.sample_batch(agent.config.batch_size) {
                     let loss = agent.train_step(batch);
                     losses.push(loss);
-
-                    // Monitor callback for training step
-                    if let Some(m) = monitor.as_mut() {
-                        m.on_step(losses.len() - 1, loss);
-                    }
                 }
             }
 
@@ -180,13 +162,6 @@ pub fn train_agent<
         }
 
         episode_rewards.push(total_reward as f32);
-
-        // Monitor callback for episode completion
-        if let Some(m) = monitor.as_mut() {
-            // Get tier states from environment buffer
-            let tier_states: Vec<f32> = env.get_tier_utilization();
-            m.on_episode_end(episode, total_reward as f32, agent.epsilon, &tier_states);
-        }
 
         // Epsilon decay after each episode
         agent.epsilon = (agent.epsilon * 0.995).max(0.01);
@@ -335,6 +310,154 @@ pub fn train_agent_burn<
         // Decay epsilon after episode
         epsilon_callback.decay();
     }
+
+    TrainingResult {
+        episode_rewards,
+        losses,
+        final_epsilon: epsilon_callback.epsilon(),
+    }
+}
+
+/// Train agent with live metrics dashboard.
+///
+/// This function provides the same training as `train_agent_burn` but with
+/// live progress display using Burn's metrics infrastructure.
+///
+/// # Arguments
+///
+/// * `env` - Environment implementing the [`Environment`] trait
+/// * `agent` - Combined agent with model and replay buffer
+/// * `num_episodes` - Number of episodes to train
+/// * `tier_selector` - Tier selector for action selection
+///
+/// # Returns
+///
+/// Training result with episode rewards, losses, and final epsilon
+///
+/// # Progress Display
+///
+/// Shows live metrics:
+/// - Episode number and progress
+/// - Running average reward
+/// - Current epsilon value
+/// - Training loss
+pub fn train_agent_with_metrics<
+    B: AutodiffBackend,
+    E: Environment<Observation = Vec<f64>, Action = usize>,
+>(
+    env: &mut E,
+    agent: &mut CombinedAgent<B>,
+    num_episodes: usize,
+    tier_selector: &TierSelector,
+) -> TrainingResult {
+    use crate::training::burn_callbacks::{EpsilonDecayCallback, TargetUpdateCallback};
+
+    // Initialize tracking
+    let mut episode_rewards = Vec::with_capacity(num_episodes);
+    let mut losses = Vec::new();
+
+    // Create DQN-specific callbacks
+    let target_callback = TargetUpdateCallback::new(agent.config.target_update_freq);
+    let mut epsilon_callback = EpsilonDecayCallback::new(
+        agent.epsilon,
+        agent.config.epsilon_end,
+        agent.config.epsilon_decay,
+    );
+
+    println!("Training {} episodes...", num_episodes);
+    println!(
+        "{:>10} {:>12} {:>10} {:>10} {:>10}",
+        "Episode", "Reward", "Avg", "Epsilon", "Loss"
+    );
+    println!("{}", "-".repeat(54));
+
+    // Main training loop
+    for episode in 0..num_episodes {
+        let mut total_reward = 0.0;
+        let mut done = false;
+        let mut state = env.reset();
+        let mut episode_loss = 0.0;
+        let mut loss_count = 0;
+
+        // Episode loop
+        while !done {
+            // Get action from policy
+            let state_f32: Vec<f32> = state.iter().map(|&x| x as f32).collect();
+            let state_data = TensorData::new(state_f32.clone(), [1, state_f32.len()]);
+            let state_tensor = Tensor::from_data(state_data.convert::<f32>(), &agent.device);
+
+            let action =
+                agent
+                    .model
+                    .select_action(state_tensor, tier_selector, epsilon_callback.epsilon());
+
+            // Step environment
+            let result = env.step(action);
+            total_reward += result.reward;
+
+            // Store transition
+            let next_state_f32: Vec<f32> = result.observation.iter().map(|&x| x as f32).collect();
+            agent.buffer.push(Transition {
+                state: state_f32,
+                action,
+                reward: result.reward as f32,
+                next_state: next_state_f32,
+                done: result.done,
+            });
+
+            // Train with Burn's TrainStep
+            #[allow(deprecated)]
+            if agent.buffer.len() >= agent.config.batch_size {
+                if let Some(batch) = agent.buffer.sample_batch(agent.config.batch_size) {
+                    let loss = agent.train_step(batch);
+                    losses.push(loss);
+                    episode_loss += loss;
+                    loss_count += 1;
+
+                    // Update target network if needed
+                    if target_callback.should_update() {
+                        agent.hard_update_target();
+                    }
+                }
+            }
+
+            state = result.observation;
+            done = result.done;
+        }
+
+        episode_rewards.push(total_reward as f32);
+
+        // Compute running average
+        let avg_reward: f32 = episode_rewards.iter().sum::<f32>() / episode_rewards.len() as f32;
+        let avg_loss = if loss_count > 0 {
+            episode_loss / loss_count as f32
+        } else {
+            0.0
+        };
+
+        // Print progress
+        println!(
+            "{:>10} {:>12.1} {:>10.1} {:>10.3} {:>10.4}",
+            episode + 1,
+            total_reward,
+            avg_reward,
+            epsilon_callback.epsilon(),
+            avg_loss
+        );
+
+        // Decay epsilon after episode
+        epsilon_callback.decay();
+    }
+
+    println!("{}", "-".repeat(54));
+    println!(
+        "Training complete! Final epsilon: {:.3}",
+        epsilon_callback.epsilon()
+    );
+    println!(
+        "Average reward: {:.2}",
+        episode_rewards.iter().sum::<f32>() / episode_rewards.len() as f32
+    );
 
     TrainingResult {
         episode_rewards,

@@ -1,4 +1,4 @@
-use crate::config::TierConfig;
+use crate::config_old::TierConfig;
 use crate::error::{EnvError, Result};
 use std::cell::Cell;
 use std::collections::HashMap;

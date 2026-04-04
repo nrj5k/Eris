@@ -1,0 +1,58 @@
+# Eris Training Configuration - Extended Format
+
+[[tier]]
+name = "Memory"
+tier_id = 0
+capacity = 800000.0
+access_latency = 0.01
+description = "Fastest tier - RAM"
+
+[[tier]]
+name = "NVMe"
+tier_id = 1
+capacity = 2000000.0
+access_latency = 1.0
+description = "NVMe SSD tier"
+
+[[tier]]
+name = "SSD"
+tier_id = 2
+capacity = 4000000.0
+access_latency = 10.0
+description = "Standard SSD tier"
+
+[[tier]]
+name = "HDD"
+tier_id = 3
+capacity = 20000000.0
+access_latency = 10000.0
+description = "Hard disk drive tier"
+
+[[tier]]
+name = "Tapes"
+tier_id = 4
+capacity = 999999999999.0
+access_latency = 1000000.0
+description = "Cold storage - tape archive"
+
+[model]
+architecture = "dueling_dqn"
+bandit_hidden = [64, 128]
+dqn_hidden = [128, 128]
+feature_dim = 20
+
+[training]
+episodes = 100
+max_steps = 1000
+batch_size = 512
+learning_rate = 0.001
+gamma = 0.99
+epsilon_start = 1.0
+epsilon_end = 0.01
+epsilon_decay = 0.995
+target_update_freq = 10
+replay_buffer_size = 10000
+
+[backend]
+backend_type = "cpu"
+device_id = 0

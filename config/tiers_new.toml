@@ -1,0 +1,88 @@
+# Eris Training Configuration
+# This is the new comprehensive config format
+
+# Storage tier configuration
+[[tiers]]
+name = "Memory"
+tier_id = 0
+capacity = 800000.0        # 800 KB
+access_latency = 0.01      # 0.01 ms
+description = "Fastest tier - RAM"
+
+[[tiers]]
+name = "NVMe"
+tier_id = 1
+capacity = 2000000.0       # 2 MB
+access_latency = 1.0       # 1.0 ms
+description = "NVMe SSD tier"
+
+[[tiers]]
+name = "SSD"
+tier_id = 2
+capacity = 4000000.0       # 4 MB
+access_latency = 10.0      # 10.0 ms
+description = "Standard SSD tier"
+
+[[tiers]]
+name = "HDD"
+tier_id = 3
+capacity = 20000000.0      # 20 MB
+access_latency = 10000.0    # 10,000 ms (10 seconds)
+description = "Hard disk drive tier"
+
+[[tiers]]
+name = "Tapes"
+tier_id = 4
+capacity = 999999999999.0  # Effectively infinite
+access_latency = 1000000.0 # 1,000,000 ms (16.67 minutes)
+description = "Cold storage - tape archive"
+
+# Model architecture configuration
+[model]
+# Model architecture: "dueling_dqn", "bandit_dqn", "simple_dqn"
+architecture = "dueling_dqn"
+
+# Hidden layer sizes for bandit network
+bandit_hidden = [64, 128]
+
+# Hidden layer sizes for DQN network
+dqn_hidden = [128, 128]
+
+# Feature dimension (bandit output / DQN input)
+feature_dim = 20
+
+# Training hyperparameters
+[training]
+# Number of training episodes
+episodes = 100
+
+# Maximum steps per episode
+max_steps = 1000
+
+# Batch size for training
+batch_size = 512
+
+# Learning rate
+learning_rate = 0.001
+
+# Discount factor (gamma)
+gamma = 0.99
+
+# Exploration parameters (epsilon-greedy)
+epsilon_start = 1.0
+epsilon_end = 0.01
+epsilon_decay = 0.995
+
+# Target network update frequency (in episodes)
+target_update_freq = 10
+
+# Replay buffer size
+replay_buffer_size = 10000
+
+# Backend selection
+[backend]
+# Backend type: "cpu", "gpu", "torch", "cuda", "rocm"
+backend_type = "cpu"
+
+# Device ID for GPU/accelerator backends
+device_id = 0

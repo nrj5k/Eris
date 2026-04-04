@@ -70,11 +70,16 @@
 mod bandit_config;
 mod combined_config;
 mod dqn_config;
+mod training_config;
 
 pub use bandit_config::{BanditConfig, BanditConfigBuilder};
 pub use combined_config::{CombinedBanditDQNConfig, CombinedBanditDQNConfigBuilder};
 pub use dqn_config::{DQNConfig, DQNConfigBuilder};
+pub use training_config::{
+    BackendConfig, BackendType, ModelArchitecture, ModelConfig, TierConfig,
+    TrainingConfig as FullTrainingConfig, TrainingParams,
+};
 
 // Re-export the original config module for backwards compatibility
 // but update references internally
-pub use crate::config_old::{Config, TierConfig};
+pub use crate::config_old::{Config, TierConfig as OldTierConfig};

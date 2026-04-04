@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{backend::Backend, Int, Tensor, TensorData};
 
 use crate::training::{ReplayBuffer, Transition};
 

@@ -106,6 +106,7 @@ pub mod error;
 pub mod features;
 pub mod model;
 pub mod models;
+pub mod rl;
 pub mod space;
 pub mod tier;
 pub mod trace;
@@ -120,13 +121,13 @@ pub use config_old::{Config, TierConfig};
 pub use error::{EnvError, Result};
 
 // Features
-pub use features::{AccessRecord, AccessTracker, BlobFeatures, HotnessConfig, hotness_score};
+pub use features::{hotness_score, AccessRecord, AccessTracker, BlobFeatures, HotnessConfig};
 
 // Model
 pub use model::{Activation, ErisDefaults, Model};
 pub use models::{
-    CombinedModel, CombinedModelConfig, ContextualBandit, ContextualBanditConfig, QNetwork,
-    QNetworkConfig, decode_action, encode_action,
+    decode_action, encode_action, CombinedModel, CombinedModelConfig, ContextualBandit,
+    ContextualBanditConfig, QNetwork, QNetworkConfig,
 };
 
 // Space types
@@ -143,9 +144,12 @@ pub use trace::{BlobData, IoOp, TraceReader};
 
 // Training
 pub use training::{
-    CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer, TrainingConfig, TrainingResult,
-    Transition, TransitionBatch, train_agent,
+    train_agent, CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer, TrainingConfig,
+    TrainingResult, Transition, TransitionBatch,
 };
+
+// RL integration
+pub use rl::{Action, ActionDistribution, DQNPolicy, DQNPolicyState, Observation};
 
 #[cfg(test)]
 mod tests {

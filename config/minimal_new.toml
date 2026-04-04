@@ -1,0 +1,6 @@
+[[tier]]
+name = "Memory"
+tier_id = 0
+capacity = 800000.0
+access_latency = 0.01
+description = "Fastest tier - RAM"

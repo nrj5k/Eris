@@ -1,0 +1,23 @@
+[[tiers]]
+name = "Memory"
+tier_id = 0
+capacity = 800000.0
+access_latency = 0.01
+description = "Fastest tier - RAM"
+
+[[tiers]]
+name = "NVMe"
+tier_id = 1
+capacity = 2000000.0
+access_latency = 1.0
+description = "NVMe SSD tier"
+
+[model]
+architecture = "dueling_dqn"
+feature_dim = 20
+
+[training]
+episodes = 100
+max_steps = 1000
+batch_size = 512
+learning_rate = 0.001
