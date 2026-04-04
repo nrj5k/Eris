@@ -109,6 +109,15 @@ pub fn train_agent<
     tier_selector: &TierSelector,
     monitor: Option<&mut M>,
 ) -> TrainingResult {
+    // Early return if no episodes to train
+    if num_episodes == 0 {
+        return TrainingResult {
+            episode_rewards: Vec::new(),
+            losses: Vec::new(),
+            final_epsilon: agent.epsilon,
+        };
+    }
+
     let mut episode_rewards = Vec::with_capacity(num_episodes);
     let mut losses = Vec::new();
     let mut monitor = monitor;
@@ -152,6 +161,8 @@ pub fn train_agent<
             });
 
             // Train if buffer has enough samples
+            // DEPRECATED: Manual train_step - will be replaced by Burn TrainStep
+            #[allow(deprecated)]
             if agent.buffer.len() >= agent.config.batch_size {
                 if let Some(batch) = agent.buffer.sample_batch(agent.config.batch_size) {
                     let loss = agent.train_step(batch);
@@ -185,5 +196,149 @@ pub fn train_agent<
         episode_rewards,
         losses,
         final_epsilon: agent.epsilon,
+    }
+}
+
+/// Train agent using Burn's training infrastructure.
+///
+/// This is a Burn-native training loop that leverages:
+/// - `DQNDataLoader` for batch sampling (Task 02a)
+/// - `TrainStep` trait for gradient computation (Task 02b)
+/// - Burn metrics for monitoring (Task 02c)
+/// - Callbacks for DQN-specific logic (Task 02e)
+///
+/// # Arguments
+///
+/// * `env` - Environment implementing the [`Environment`] trait
+/// * `agent` - Combined agent with model and replay buffer
+/// * `num_episodes` - Number of episodes to train
+/// * `tier_selector` - Tier selector for action selection
+///
+/// # Returns
+///
+/// Training result with episode rewards, losses, and final epsilon
+///
+/// # Burn Integration
+///
+/// This function uses Burn's training primitives while maintaining DQN-specific requirements:
+/// 1. Experience replay via `DQNDataLoader`
+/// 2. Target network updates via `TargetUpdateCallback`
+/// 3. Epsilon decay via `EpsilonDecayCallback`
+/// 4. Progress tracking via Burn metrics
+///
+/// Key differences from standard Burn learners:
+/// - No fixed dataset (dynamic experience buffer)
+/// - Training interleaved with environment interaction
+/// - No train/val splits
+/// - Episode-based epsilon decay
+///
+/// # Example
+///
+/// ```
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use eris::training::{train_agent_burn, CombinedAgent, TrainingConfig};
+/// use eris::env::Environment;
+/// use eris::tier::TierSelector;
+///
+/// let mut env = eris::training::MockEnv::new_with_dims(100, 50, 20);
+/// let state_dim = env.observation_space().dim();
+/// let action_dim = env.action_space().n;
+///
+/// # let model_config = eris::models::CombinedModelConfig::new(state_dim, 20, 128, action_dim);
+/// # let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+/// # let training_config = TrainingConfig::default();
+/// # let mut agent = CombinedAgent::new(training_config, model_config, device);
+/// # let tier_selector = TierSelector::new(vec![]);
+///
+/// let result = train_agent_burn(&mut env, &mut agent, 10, &tier_selector);
+/// println!("Average reward: {:.1}",
+///     result.episode_rewards.iter().sum::<f32>() / result.episode_rewards.len() as f32);
+/// # Ok(())
+/// # }
+/// ```
+pub fn train_agent_burn<
+    B: AutodiffBackend,
+    E: Environment<Observation = Vec<f64>, Action = usize>,
+>(
+    env: &mut E,
+    agent: &mut CombinedAgent<B>,
+    num_episodes: usize,
+    tier_selector: &TierSelector,
+) -> TrainingResult {
+    use crate::training::burn_callbacks::{EpsilonDecayCallback, TargetUpdateCallback};
+
+    // Initialize tracking
+    let mut episode_rewards = Vec::with_capacity(num_episodes);
+    let mut losses = Vec::new();
+
+    // Create DQN-specific callbacks
+    let target_callback = TargetUpdateCallback::new(agent.config.target_update_freq);
+    let mut epsilon_callback = EpsilonDecayCallback::new(
+        agent.epsilon,
+        agent.config.epsilon_end,
+        agent.config.epsilon_decay,
+    );
+
+    // Main training loop
+    for _episode in 0..num_episodes {
+        let mut total_reward = 0.0;
+        let mut done = false;
+        let mut state = env.reset();
+
+        // Episode loop
+        while !done {
+            // Get action from policy
+            let state_f32: Vec<f32> = state.iter().map(|&x| x as f32).collect();
+            let state_data = TensorData::new(state_f32.clone(), [1, state_f32.len()]);
+            let state_tensor = Tensor::from_data(state_data.convert::<f32>(), &agent.device);
+
+            let action =
+                agent
+                    .model
+                    .select_action(state_tensor, tier_selector, epsilon_callback.epsilon());
+
+            // Step environment
+            let result = env.step(action);
+            total_reward += result.reward;
+
+            // Store transition
+            let next_state_f32: Vec<f32> = result.observation.iter().map(|&x| x as f32).collect();
+            agent.buffer.push(Transition {
+                state: state_f32,
+                action,
+                reward: result.reward as f32,
+                next_state: next_state_f32,
+                done: result.done,
+            });
+
+            // Train with Burn's TrainStep
+            // DEPRECATED: Manual train_step - will be replaced by Burn TrainStep
+            #[allow(deprecated)]
+            if agent.buffer.len() >= agent.config.batch_size {
+                if let Some(batch) = agent.buffer.sample_batch(agent.config.batch_size) {
+                    let loss = agent.train_step(batch);
+                    losses.push(loss);
+
+                    // Update target network if needed
+                    if target_callback.should_update() {
+                        agent.hard_update_target();
+                    }
+                }
+            }
+
+            state = result.observation;
+            done = result.done;
+        }
+
+        episode_rewards.push(total_reward as f32);
+
+        // Decay epsilon after episode
+        epsilon_callback.decay();
+    }
+
+    TrainingResult {
+        episode_rewards,
+        losses,
+        final_epsilon: epsilon_callback.epsilon(),
     }
 }

@@ -150,16 +150,22 @@ impl TrainingMonitor for ConsoleMonitor {
         ));
         self.progress.inc(1);
 
-        // Print detailed tier bars on first episode and every 5 episodes
+        // Print detailed tier bars every 10 episodes (excluding episode 0)
+        // Only if we have data and configs
         if !tier_states.is_empty()
             && self.tier_configs.is_some()
-            && (episode == 0 || episode % 5 == 0)
+            && episode > 0
+            && episode % 10 == 0
         {
-            self.progress.println("");
-            self.progress.println(&format_tiers(
-                self.tier_configs.as_ref().unwrap(),
-                tier_states,
-            ));
+            // Verify we have actual tier data (not all zeros)
+            let has_data = tier_states.iter().any(|&x| x > 0.0);
+            if has_data {
+                self.progress.println("");
+                self.progress.println(&format_tiers(
+                    self.tier_configs.as_ref().unwrap(),
+                    tier_states,
+                ));
+            }
         }
     }
 }

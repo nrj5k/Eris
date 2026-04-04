@@ -3,7 +3,7 @@ mod combined;
 mod dqn;
 
 pub use bandit::{ContextualBandit, ContextualBanditConfig};
-pub use combined::{decode_action, encode_action, CombinedModel, CombinedModelConfig};
+pub use combined::{CombinedModel, CombinedModelConfig, decode_action, encode_action};
 pub use dqn::{QNetwork, QNetworkConfig};
 
 // Note: Use the new configuration API from src/config/ for new projects

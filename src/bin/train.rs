@@ -12,7 +12,7 @@ use eris::config::Config;
 use eris::env::IOBufferEnv;
 use eris::models::CombinedModelConfig;
 use eris::tier::Tier;
-use eris::training::{train_agent, CombinedAgent, ConsoleMonitor, TrainingConfig};
+use eris::training::{CombinedAgent, ConsoleMonitor, TrainingConfig, train_agent_burn};
 use eris::{Environment, Space};
 
 #[derive(Parser, Debug)]
@@ -113,13 +113,7 @@ fn run_training(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
 
-            let result = train_agent(
-                &mut env,
-                &mut agent,
-                args.episodes,
-                &tier_selector,
-                monitor.as_mut(),
-            );
+            let result = train_agent_burn(&mut env, &mut agent, args.episodes, &tier_selector);
 
             tracing::info!("Training complete!");
             tracing::info!(
@@ -146,13 +140,7 @@ fn run_training(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
 
-            let result = train_agent(
-                &mut env,
-                &mut agent,
-                args.episodes,
-                &tier_selector,
-                monitor.as_mut(),
-            );
+            let result = train_agent_burn(&mut env, &mut agent, args.episodes, &tier_selector);
 
             tracing::info!("Training complete!");
             tracing::info!(

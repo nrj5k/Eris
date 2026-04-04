@@ -1,6 +1,6 @@
 use crate::config::TierConfig;
-use crate::tier::selector::TierSelector;
 use crate::tier::Tier;
+use crate::tier::selector::TierSelector;
 
 /// Multi-tier storage environment coordinator
 ///

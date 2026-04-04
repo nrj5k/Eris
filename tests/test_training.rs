@@ -1,3 +1,15 @@
+// Test file for DQN training components
+//
+// **⚠️ DEPRECATION NOTICE:**
+// Tests using `train_step()` are maintained for backward compatibility.
+// The manual train_step method is deprecated - use Burn TrainStep instead.
+// See src/training/burn_trainer.rs for Burn-native implementation.
+//
+// These tests remain to verify:
+// - Legacy functionality continues working
+// - Backward compatibility during transition
+// - Target network updates work correctly
+
 use burn::backend::{Autodiff, NdArray};
 use eris::training::{
     create_dummy_transition, fill_buffer, CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer,
@@ -119,7 +131,7 @@ fn test_training_config_default() {
     assert_eq!(config.epsilon_start, 1.0);
     assert_eq!(config.epsilon_end, 0.01);
     assert_eq!(config.epsilon_decay, 0.995);
-    assert_eq!(config.batch_size, 32);
+    assert_eq!(config.batch_size, 512); // Updated for GPU utilization
     assert_eq!(config.buffer_capacity, 10_000);
     assert_eq!(config.target_update_freq, 1000);
     assert_eq!(config.tau, 0.005);
@@ -185,6 +197,7 @@ fn create_test_agent() -> CombinedAgent<TestBackend> {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_train_step_returns_valid_loss() {
     let mut agent = create_test_agent();
 
@@ -202,6 +215,7 @@ fn test_train_step_returns_valid_loss() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_train_step_updates_weights() {
     let mut agent = create_test_agent();
 
@@ -231,6 +245,7 @@ fn test_train_step_updates_weights() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_hard_update_target() {
     let mut agent = create_test_agent();
 
@@ -302,7 +317,7 @@ fn test_training_config_defaults() {
     assert_eq!(config.epsilon_start, 1.0);
     assert_eq!(config.epsilon_end, 0.01);
     assert_eq!(config.epsilon_decay, 0.995);
-    assert_eq!(config.batch_size, 32);
+    assert_eq!(config.batch_size, 512); // Updated for GPU utilization
     assert_eq!(config.buffer_capacity, 10_000);
     assert_eq!(config.target_update_freq, 1000);
     assert_eq!(config.tau, 0.005);
@@ -329,6 +344,7 @@ fn test_agent_initialization() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_epsilon_decay() {
     let mut agent = create_test_agent();
     let initial_epsilon = agent.epsilon;
@@ -348,6 +364,7 @@ fn test_epsilon_decay() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_train_step_empty_batch() {
     let mut agent = create_test_agent();
 

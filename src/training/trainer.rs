@@ -1,3 +1,29 @@
+//! Manual DQN Training Implementation (Legacy)
+//!
+//! **⚠️ DEPRECATION NOTICE:**
+//! The `train_step()` method in this module is deprecated. Use the Burn `TrainStep`
+//! implementation in `burn_trainer.rs` with Burn's training pipeline instead.
+//!
+//! **Current status:**
+//! - Manual `train_step()` remains for backward compatibility
+//! - Burn `TrainStep` implementation exists in `burn_trainer.rs`
+//! - See migration guide below
+//!
+//! **Migration Guide:**
+//! ```rust,ignore
+//! // OLD (deprecated):
+//! let loss = agent.train_step(batch);
+//!
+//! // NEW (recommended):
+//! // Use Burn's LearnerBuilder with TrainStep trait:
+//! // See src/training/burn_trainer.rs for complete implementation
+//! ```
+//!
+//! **Why both exist:**
+//! - Manual version: Complete DQN with target network, replay buffer
+//! - Burn version: Simpler, automatic gradients, but lacks target network
+//! - Keep both during transition period
+
 use burn::module::Module;
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
@@ -111,13 +137,36 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         }
     }
 
-    /// Perform one DQN training step
+    /// Perform one DQN training step (DEPRECATED - use Burn Trainer)
+    ///
+    /// **⚠️ DEPRECATION NOTICE:**
+    /// This manual implementation is deprecated. Use the Burn `TrainStep` implementation
+    /// in `burn_trainer.rs` with Burn's training pipeline instead.
+    ///
+    /// **Migration Guide:**
+    /// - See `src/training/burn_trainer.rs` for Burn TrainStep implementation
+    /// - Use Burn's `LearnerBuilder` for proper training loop
+    /// - The `TrainStep` trait provides automatic gradient handling
+    ///
+    /// **Why keep this?**
+    /// This method remains for backward compatibility and provides complete DQN training with:
+    /// - Target network updates (hard/soft)
+    /// - Experience replay integration
+    /// - Gradient clipping
+    /// - Full TD learning with Bellman equation
+    ///
+    /// The Burn `TrainStep` is simpler but lacks target network support currently.
     ///
     /// # Arguments
     /// * `batch` - Batch of transitions from replay buffer
     ///
     /// # Returns
     /// * MSE loss value (non-negative, finite)
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use Burn TrainStep implementation with LearnerBuilder. See burn_trainer.rs for details."
+    )]
+    #[allow(deprecated)]
     pub fn train_step(&mut self, batch: TransitionBatch) -> f32 {
         if batch.states.is_empty() {
             tracing::warn!("train_step called with empty batch");
@@ -187,10 +236,12 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         let loss = diff.powf_scalar(2.0).mean();
 
         // Backpropagation
+        // DEPRECATED: Manual gradient computation - use Burn TrainStep instead
         let grads = loss.backward();
         let grads = GradientsParams::from_grads(grads, &self.model);
 
         // Create optimizer and update parameters
+        // DEPRECATED: Manual optimizer.step() - Burn TrainStep handles this automatically
         let mut optimizer = AdamConfig::new()
             .with_beta_1(0.9)
             .with_beta_2(0.999)

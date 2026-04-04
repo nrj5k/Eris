@@ -120,13 +120,13 @@ pub use config_old::{Config, TierConfig};
 pub use error::{EnvError, Result};
 
 // Features
-pub use features::{hotness_score, AccessRecord, AccessTracker, BlobFeatures, HotnessConfig};
+pub use features::{AccessRecord, AccessTracker, BlobFeatures, HotnessConfig, hotness_score};
 
 // Model
 pub use model::{Activation, ErisDefaults, Model};
 pub use models::{
-    decode_action, encode_action, CombinedModel, CombinedModelConfig, ContextualBandit,
-    ContextualBanditConfig, QNetwork, QNetworkConfig,
+    CombinedModel, CombinedModelConfig, ContextualBandit, ContextualBanditConfig, QNetwork,
+    QNetworkConfig, decode_action, encode_action,
 };
 
 // Space types
@@ -143,8 +143,8 @@ pub use trace::{BlobData, IoOp, TraceReader};
 
 // Training
 pub use training::{
-    train_agent, CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer, TrainingConfig,
-    TrainingResult, Transition, TransitionBatch,
+    CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer, TrainingConfig, TrainingResult,
+    Transition, TransitionBatch, train_agent,
 };
 
 #[cfg(test)]
