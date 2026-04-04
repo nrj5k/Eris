@@ -1,5 +1,5 @@
 use eris::config::TierConfig;
-use eris::features::{hotness_score, HotnessConfig};
+use eris::features::{HotnessConfig, hotness_score};
 use eris::tier::{BufferEnv, Tier, TierSelector};
 
 #[test]

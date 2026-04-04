@@ -59,7 +59,35 @@ impl QNetworkConfig {
     ///
     /// # Returns
     /// Initialized QNetwork with random weights
+    ///
+    /// # Deprecation Notice
+    ///
+    /// This config type is deprecated. Use `eris::config::DQNConfig` with the builder pattern instead:
+    /// ```rust,ignore
+    /// use eris::config::DQNConfig;
+    /// use eris::training::mock_env::MockEnv;
+    ///
+    /// // Get dimensions from environment
+    /// let env = MockEnv::new_with_dims(100, 50, 20);
+    /// let action_dim = env.action_space().n;
+    /// let feature_dim = 20;
+    ///
+    /// let config = DQNConfig::builder()
+    ///     .input_dim(feature_dim)
+    ///     .hidden_layers(vec![128, 128])
+    ///     .action_dim(action_dim)
+    ///     .dueling(true)
+    ///     .build()?;
+    /// ```
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use `eris::config::DQNConfig` with builder pattern instead"
+    )]
     pub fn init<B: Backend>(&self, device: &B::Device) -> QNetwork<B> {
+        log::warn!(
+            "QNetworkConfig is deprecated. Use eris::config::DQNConfig with builder pattern"
+        );
+
         QNetwork {
             fc1: LinearConfig::new(self.input_dim, self.hidden_dim)
                 .with_bias(self.bias)

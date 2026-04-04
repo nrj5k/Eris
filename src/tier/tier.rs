@@ -35,6 +35,11 @@ impl Tier {
     /// # Errors
     /// Returns `EnvError::CapacityExceeded` if the blob would exceed tier capacity
     pub fn write(&mut self, blob_id: &str, size: f64) -> Result<()> {
+        // Remove old size if blob already exists
+        if let Some(old_size) = self.storage.get(blob_id) {
+            self.current_size -= *old_size;
+        }
+
         if self.current_size + size > self.config.capacity {
             return Err(EnvError::CapacityExceeded {
                 tier_id: self.config.tier_id,
@@ -107,6 +112,11 @@ impl Tier {
     /// Get number of blobs in this tier
     pub fn blob_count(&self) -> usize {
         self.storage.len()
+    }
+
+    /// Get all blob IDs stored in this tier
+    pub fn storage_keys(&self) -> Vec<String> {
+        self.storage.keys().cloned().collect()
     }
 }
 
@@ -199,5 +209,40 @@ mod tests {
 
         tier.write("blob2", 250.0).unwrap();
         approx::assert_relative_eq!(tier.utilization(), 0.75, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn test_duplicate_write_updates_size() {
+        // Test that writing the same blob twice updates size correctly
+        let mut tier = Tier::new(test_config());
+
+        // Write blob1 with size 500
+        tier.write("blob1", 500.0).unwrap();
+        assert_eq!(tier.current_size(), 500.0);
+        assert_eq!(tier.blob_count(), 1);
+
+        // Write blob1 again with size 700
+        tier.write("blob1", 700.0).unwrap();
+        assert_eq!(tier.current_size(), 700.0); // Should be 700, not 1200
+        assert_eq!(tier.blob_count(), 1);
+
+        // Verify blob size was updated
+        let size = tier.read("blob1");
+        assert_eq!(size, Some(700.0));
+    }
+
+    #[test]
+    fn test_duplicate_write_within_capacity() {
+        // Test that duplicate write doesn't exceed capacity incorrectly
+        let mut tier = Tier::new(test_config());
+
+        // Fill tier to 80% capacity
+        tier.write("blob1", 800.0).unwrap();
+        assert_eq!(tier.current_size(), 800.0);
+
+        // Overwrite blob1 with new size (should succeed even though 800+300 > capacity)
+        // because we remove old size first
+        assert!(tier.write("blob1", 300.0).is_ok());
+        assert_eq!(tier.current_size(), 300.0);
     }
 }

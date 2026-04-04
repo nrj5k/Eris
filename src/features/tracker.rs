@@ -87,17 +87,25 @@ impl AccessTracker {
 
     /// Calculate reuse distance (position since last access)
     ///
-    /// Returns None if blob has never been accessed.
-    /// Returns Some(distance) where distance is the number of positions
-    /// from the end of the access sequence to the most recent occurrence of this blob.
+    /// The reuse distance represents how recently a blob was accessed relative to the
+    /// overall access pattern. This is useful for cache eviction policies and hotness scoring.
     ///
-    /// For example, if sequence is ["A", "B", "C", "A"] and we query "A":
-    /// - Last occurrence of "A" is at position 0 from the end (just accessed)
-    ///   Returns Some(0)
+    /// # Returns
+    /// * `None` if blob has never been accessed
+    /// * `Some(distance)` where distance is the number of positions from the end of
+    ///   the access sequence to the most recent occurrence of this blob
     ///
-    /// If we query "B":
-    /// - Last occurrence of "B" is at position 2 from the end
-    ///   Returns Some(2)
+    /// # Examples
+    ///
+    /// If the access sequence is ["A", "B", "C", "A"] and we query:
+    /// - For "A": Returns Some(0) (last occurrence is at position 0 from the end, just accessed)
+    /// - For "B": Returns Some(2) (last occurrence is at position 2 from the end)
+    /// - For "C": Returns Some(1) (last occurrence is at position 1 from the end)
+    /// - For "D": Returns None (never accessed)
+    ///
+    /// # Note
+    /// Lower reuse distance means more recently accessed, which typically indicates
+    /// higher temporal locality and potential "hotness" for caching decisions.
     pub fn get_reuse_distance(&self, blob_id: &str) -> Option<usize> {
         // Find position of last access in the sequence (from the back)
         let last_pos = self

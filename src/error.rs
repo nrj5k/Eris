@@ -6,7 +6,9 @@ pub enum EnvError {
     #[error("invalid tier index {provided} (max {max})")]
     InvalidTierIndex { provided: usize, max: usize },
 
-    #[error("tier {tier_id} capacity exceeded: requested {requested} bytes, available {available} bytes")]
+    #[error(
+        "tier {tier_id} capacity exceeded: requested {requested} bytes, available {available} bytes"
+    )]
     CapacityExceeded {
         tier_id: u32,
         requested: f64,
@@ -30,6 +32,9 @@ pub enum EnvError {
 
     #[error("trace exhausted")]
     TraceExhausted,
+
+    #[error("invalid space: {0}")]
+    InvalidSpace(String),
 }
 
 /// Result type alias for convenience

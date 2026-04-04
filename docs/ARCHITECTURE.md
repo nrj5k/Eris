@@ -1,31 +1,66 @@
-# HeirGym Enhanced Models Architecture
+# Eris System Architecture
 
-## Project Overview
+This document provides a comprehensive overview of the eris system's architecture, covering all components, data flows, and design decisions.
 
-HeirGym Enhanced Models is a multi-tiered storage optimization system that leverages Reinforcement Learning to make intelligent data placement decisions across heterogeneous storage tiers. The system implements a hybrid approach combining Deep Q-Network (DQN) and Contextual Bandit algorithms to achieve optimal storage performance.
+## High-Level Architecture
 
-### Purpose
+The eris system follows a classic reinforcement learning pipeline adapted for storage optimization:
 
-The primary goal of this project is to dramatically improve storage access latency by dynamically placing frequently accessed data ("hot" data) on faster storage tiers while demoting cold data to slower, cheaper tiers. By learning access patterns from real-world traces, the system can predict and pre-position data before it's needed.
-
-### Performance Goals
-
-The Rust implementation targets significant performance improvements over the original Python implementation:
-
-| Metric | Python Baseline | Rust Target | Improvement |
-|--------|----------------|-------------|-------------|
-| Per-step latency | ~1ms | <100μs | 10x |
-| Training throughput | 100 eps/hr | 5000 eps/hr | 50x |
-| Memory footprint | ~100MB | <20MB | 5x |
-| Feature extraction | ~1ms | <100μs | 10x |
-
-### Supported Models
-
-The system implements three distinct RL models that can be used independently or in combination:
-
-1. **EnhancedDQN (QNetwork)**: A deep Q-network that learns optimal tier selection based on state features
-2. **ContextualBandit**: A bandit model that estimates the importance of each data blob and selects appropriate tiers
-3. **Combined**: A unified model that leverages both approaches for comprehensive optimization
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           DATA FLOW                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Trace CSV Files                                                         │
+│       │                                                                   │
+│       ▼                                                                   │
+│  ┌─────────────────┐                                                     │
+│  │  TraceReader    │  Parses CSV → BlobData                              │
+│  └────────┬────────┘                                                     │
+│           │                                                              │
+│           ▼                                                              │
+│  ┌─────────────────┐     ┌───────────────────────────────────────────┐  │
+│  │  IOBufferEnv    │────▶│  State: [5 tier sizes + 10 features]      │  │
+│  │  (RL Env)       │◀────│  15-dimensional observation space         │  │
+│  └────────┬────────┘     └───────────────────────────────────────────┘  │
+│           │                                                              │
+│           │ Action (0-9)                                                 │
+│           │ 5 tiers × 2 ops = 10 actions                                 │
+│           ▼                                                              │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                    CombinedAgent                                 │    │
+│  │  ┌─────────────────┐    ┌────────────────────────────────────┐  │    │
+│  │  │ Contextual      │───▶│ DQN (Dueling Architecture)         │  │    │
+│  │  │ Bandit          │    │ ┌────────┐  ┌──────────────────┐  │  │    │
+│  │  │ - Feature extr  │    │ │  V(s)  │  │  A(s,a)          │  │  │    │
+│  │  │ - Importance    │    │ │ Stream │  │  Stream          │  │  │    │
+│  │  └─────────────────┘    │ └────┬───┘  └─────┬────────────┘  │  │    │
+│  │                          │      │            │               │  │    │
+│  │                          │      ▼            ▼               │  │    │
+│  │                          │  Q(s,a) = V(s) + A(s,a) - mean(A)  │  │    │
+│  │                          └────────────────────────────────────┘  │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│           │                                                              │
+│           │ Reward (negative latency)                                    │
+│           ▼                                                              │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                    Replay Buffer                                 │    │
+│  │         Stores: (state, action, reward, next_state, done)        │    │
+│  │              Capacity: 10,000 transitions                        │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│           │                                                              │
+│           │ Batch sampling (32)                                         │
+│           ▼                                                              │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                    Training Loop                                 │    │
+│  │  - Adam optimizer (lr=0.001, beta1=0.9, beta2=0.999)            │    │
+│  │  - Target network updates (hard copy every 1000 steps)           │    │
+│  │  - Epsilon-greedy exploration (decay 0.995→0.01)                 │    │
+│  │  - Gradient clipping (max_norm=1.0)                              │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ## Component Architecture
 

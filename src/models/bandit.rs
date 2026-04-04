@@ -49,7 +49,35 @@ impl ContextualBanditConfig {
     ///
     /// # Returns
     /// Initialized ContextualBandit with random weights
+    ///
+    /// # Deprecation Notice
+    ///
+    /// This config type is deprecated. Use `eris::config::BanditConfig` with the builder pattern instead:
+    /// ```rust,ignore
+    /// use eris::config::BanditConfig;
+    /// use eris::model::Activation;
+    /// use eris::training::mock_env::MockEnv;
+    ///
+    /// // Get dimensions from environment
+    /// let env = MockEnv::new_with_dims(100, 50, 20);
+    /// let obs_dim = env.observation_space().dim();
+    ///
+    /// let config = BanditConfig::builder()
+    ///     .input_dim(obs_dim)
+    ///     .hidden_layers(vec![64, 128])
+    ///     .feature_dim(20)
+    ///     .activation(Activation::Sigmoid)
+    ///     .build()?;
+    /// ```
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use `eris::config::BanditConfig` with builder pattern instead"
+    )]
     pub fn init<B: Backend>(&self, device: &B::Device) -> ContextualBandit<B> {
+        log::warn!(
+            "ContextualBanditConfig is deprecated. Use eris::config::BanditConfig with builder pattern"
+        );
+
         ContextualBandit {
             fc1: LinearConfig::new(self.state_dim, self.hidden_dim)
                 .with_bias(self.bias)

@@ -3,6 +3,7 @@ use crate::trace::BlobData;
 use std::path::Path;
 
 /// Reader for CSV trace files
+#[derive(Debug, Clone)]
 pub struct TraceReader {
     /// All records loaded from the trace
     records: Vec<BlobData>,

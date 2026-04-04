@@ -58,12 +58,12 @@ impl BlobFeatures {
         // 2. Frequency (normalized to [0, 1])
         let frequency_raw = tracker.get_frequency(&blob.offset_id);
         let frequency = if max_frequency > 0 {
-            (frequency_raw as f32) / (max_frequency as f32)
+            ((frequency_raw as f32) / (max_frequency as f32)).min(1.0)
         } else {
             0.0
         };
 
-        // 3 & 4. Mean and Std of access intervals
+        // 3 & 4. Mean and Std of access intervals (normalized to [0, 1])
         let times = tracker.get_access_times(&blob.offset_id);
         let (mean_interval, std_interval) = if times.len() > 1 {
             let intervals: Vec<f64> = times.windows(2).map(|w| (w[1] - w[0]) as f64).collect();
@@ -74,7 +74,10 @@ impl BlobFeatures {
             } else {
                 0.0
             };
-            (mean as f32, variance.sqrt() as f32)
+            // Normalize to [0, 1] - assume max interval of 1 hour (3600000 ms)
+            let mean_normalized = (mean / 3600000.0).min(1.0) as f32;
+            let std_normalized = (variance.sqrt() / 3600000.0).min(1.0) as f32;
+            (mean_normalized, std_normalized)
         } else {
             (0.0, 0.0) // No interval history
         };
@@ -151,10 +154,10 @@ pub fn encode_state(
 ) -> Vec<f32> {
     let mut state = Vec::with_capacity(15);
 
-    // Tier sizes (5-dim, normalized to capacity)
+    // Tier sizes (5-dim, normalized to capacity, clamped to [0, 1])
     for (size, config) in tier_sizes.iter().zip(tier_configs.iter()) {
         let normalized = if config.capacity > 0.0 {
-            (size / config.capacity) as f32
+            ((size / config.capacity) as f32).min(1.0)
         } else {
             0.0
         };
@@ -302,14 +305,16 @@ mod tests {
         let features = BlobFeatures::extract(&blob, &tracker, 5000, 10000.0, 100);
 
         // Intervals: 1000, 2000
-        // Mean: 1500
-        approx::assert_relative_eq!(features.mean_interval, 1500.0, epsilon = 1e-5);
+        // Mean: 1500 ms = 1500 / 3600000 (normalized) = 0.00041666...
+        let expected_mean = 1500.0_f64 / 3_600_000.0;
+        approx::assert_relative_eq!(features.mean_interval, expected_mean as f32, epsilon = 1e-5);
 
         // Std: sqrt(((1000-1500)^2 + (2000-1500)^2) / 1)
         //    = sqrt((250000 + 250000) / 1)
         //    = sqrt(500000)
-        //    ≈ 707.107
-        let expected_std = (500000.0_f64).sqrt() as f32;
+        //    ≈ 707.107 ms
+        // Normalized: 707.107 / 3600000 ≈ 0.0001964
+        let expected_std = ((500000.0_f64).sqrt() / 3_600_000.0) as f32;
         approx::assert_relative_eq!(features.std_interval, expected_std, epsilon = 1e-3);
     }
 
@@ -404,5 +409,124 @@ mod tests {
         blob.overwrite_amount = -0.5;
         let features = BlobFeatures::extract(&blob, &tracker, 5000, 10000.0, 100);
         approx::assert_relative_eq!(features.overwrite_amount, 0.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn test_frequency_clamping() {
+        // Test that frequency is clamped to [0, 1]
+        let mut tracker = AccessTracker::new(1000);
+
+        // Record 150 accesses (more than max_frequency = 100)
+        for i in 0..150 {
+            tracker.record(AccessRecord {
+                blob_id: "test".into(),
+                timestamp_ms: i as u64 * 100,
+                access_type: IoOp::Read,
+                size: 1024.0,
+            });
+        }
+
+        let blob = create_test_blob("test");
+        let features = BlobFeatures::extract(&blob, &tracker, 50000, 10000.0, 100);
+
+        // Should be clamped to 1.0, not 1.5
+        approx::assert_relative_eq!(features.frequency, 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn test_mean_std_interval_normalization() {
+        // Test that mean_interval and std_interval are properly normalized
+        let mut tracker = AccessTracker::new(1000);
+
+        // Record accesses at very large intervals (exceeding normalization range)
+        tracker.record(AccessRecord {
+            blob_id: "test".into(),
+            timestamp_ms: 0,
+            access_type: IoOp::Read,
+            size: 1024.0,
+        });
+        tracker.record(AccessRecord {
+            blob_id: "test".into(),
+            timestamp_ms: 5_000_000, // 5 million ms = 83.3 minutes
+            access_type: IoOp::Read,
+            size: 1024.0,
+        });
+        tracker.record(AccessRecord {
+            blob_id: "test".into(),
+            timestamp_ms: 10_000_000, // 10 million ms = 166.7 minutes
+            access_type: IoOp::Read,
+            size: 1024.0,
+        });
+
+        let blob = create_test_blob("test");
+        let features = BlobFeatures::extract(&blob, &tracker, 10_000_000, 10000.0, 100);
+
+        // Intervals: 5_000_000 ms each
+        // Normalized by 3_600_000 (1 hour = 3600 seconds * 1000)
+        // After normalization and clamping to [0, 1], both should be 1.0
+        assert!(features.mean_interval >= 0.0 && features.mean_interval <= 1.0);
+        assert!(features.std_interval >= 0.0 && features.std_interval <= 1.0);
+    }
+
+    #[test]
+    fn test_tier_size_normalization_with_clamping() {
+        // Test that tier sizes are clamped to [0, 1]
+        let tier_sizes = vec![1600.0, 1000.0, 2000.0, 10000.0, 50000.0]; // First size > capacity
+        let features = BlobFeatures {
+            recency: 0.1,
+            frequency: 0.5,
+            mean_interval: 100.0,
+            std_interval: 50.0,
+            is_sequential: 1.0,
+            reuse_distance: 0.2,
+            last_access_type: 0.0,
+            size: 0.3,
+            next_access_pred: 0.9,
+            overwrite_amount: 0.4,
+        };
+        let tier_configs = vec![
+            TierConfig {
+                name: "Memory".into(),
+                tier_id: 0,
+                capacity: 800.0, // Less than tier_sizes[0]
+                access_latency: 0.01,
+                description: String::new(),
+            },
+            TierConfig {
+                name: "NVMe".into(),
+                tier_id: 1,
+                capacity: 2000.0,
+                access_latency: 1.0,
+                description: String::new(),
+            },
+            TierConfig {
+                name: "SSD".into(),
+                tier_id: 2,
+                capacity: 4000.0,
+                access_latency: 10.0,
+                description: String::new(),
+            },
+            TierConfig {
+                name: "HDD".into(),
+                tier_id: 3,
+                capacity: 20000.0,
+                access_latency: 10000.0,
+                description: String::new(),
+            },
+            TierConfig {
+                name: "Tapes".into(),
+                tier_id: 4,
+                capacity: 999999.0,
+                access_latency: 1000000.0,
+                description: String::new(),
+            },
+        ];
+
+        let state = encode_state(&tier_sizes, &features, &tier_configs);
+
+        // First tier size should be clamped to 1.0 (1600/800 = 2.0, clamped to 1.0)
+        assert_eq!(state.len(), 15);
+        approx::assert_relative_eq!(state[0], 1.0, epsilon = 1e-5); // Clamped
+        approx::assert_relative_eq!(state[1], 0.5, epsilon = 1e-5);
     }
 }

@@ -5,6 +5,7 @@ use crate::tier::Tier;
 /// Multi-tier storage environment coordinator
 ///
 /// Manages multiple storage tiers and provides aggregate state information.
+#[derive(Debug, Clone)]
 pub struct BufferEnv {
     tiers: Vec<Tier>,
 }

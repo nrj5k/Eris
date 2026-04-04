@@ -74,6 +74,24 @@ pub struct BlobData {
     pub io_op: String,
 }
 
+impl Default for BlobData {
+    fn default() -> Self {
+        Self {
+            offset_id: String::new(),
+            offset_score: 0.0,
+            offset_access_frequency: 0,
+            access_offset: None,
+            access_size: 0.0,
+            offset_size: 0.0,
+            is_sequence: false,
+            first_seen: true,
+            overwrite_amount: 0.0,
+            recency: "inf".into(),
+            io_op: "read".into(),
+        }
+    }
+}
+
 impl BlobData {
     /// Parse recency value into milliseconds, returning None for "inf"
     pub fn recency_ms(&self) -> Option<f64> {

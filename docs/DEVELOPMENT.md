@@ -1,73 +1,87 @@
-# HeirGym Enhanced Models Developer Guide
+# Eris Developer Guide
 
-This guide provides comprehensive instructions for developers working on the Eris project, covering setup, development workflows, testing, debugging, and common issues.
+This guide provides comprehensive information for developers working on the eris project, including setup instructions, project structure, coding standards, and development workflows.
 
-## Prerequisites
+## Development Environment Setup
 
-### System Requirements
+### Prerequisites
 
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| OS | Linux/macOS/Windows | Linux (Ubuntu 22.04+) |
-| CPU | 4 cores | 8+ cores |
-| RAM | 8 GB | 16+ GB |
-| Storage | 1 GB | 10+ GB |
-| GPU | Optional | NVIDIA with 4+ GB VRAM |
+| Tool | Minimum Version | Recommended Version |
+|------|-----------------|---------------------|
+| Rust | 1.75.0 | 1.80.0+ |
+| Cargo | 1.75.0 | 1.80.0+ |
+| Git | 2.0 | Latest |
+| Editor/IDE | Any | VS Code + rust-analyzer |
 
-### Required Software
+### Installation
 
-**Rust Toolchain**
 ```bash
-# Install Rust (requires 1.75 or later)
+# Install Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
 
 # Verify installation
-rustc --version  # Should be >= 1.75.0
-cargo --version  # Should be >= 1.75.0
+rustc --version
+cargo --version
 
-# Install additional components
-rustup component add rustfmt clippy
-rustup target add wasm32-unknown-unknown  # For web deployment
+# Install additional tools
+cargo install cargo-edit cargo-expand cargo-watch cargo-audit
+
+# For wgpu backend (GPU support)
+# Ensure you have Vulkan or Metal installed
+# Linux: apt install vulkan-tools
+# macOS: Included with Xcode
+# Windows: Included with GPU drivers
 ```
 
-**Build Tools**
-```bash
-# Ubuntu/Debian
-sudo apt-get install build-essential cmake pkg-config
+### IDE Setup
 
-# macOS (Xcode)
-xcode-select --install
+#### VS Code
 
-# Windows
-# Install Visual Studio Build Tools
+```json
+// .vscode/settings.json
+{
+    "rust-analyzer.checkOnSave.command": "clippy",
+    "rust-analyzer.cargo.features": ["all"],
+    "rust-analyzer.procMacro.enable": true,
+    "editor.formatOnSave": true,
+    "editor.rulers": [100],
+    "files.associations": {
+        "*.toml": "toml"
+    }
+}
 ```
 
-**GPU Support (Optional)**
+Recommended extensions:
+- rust-analyzer
+- Even Better TOML
+- Error Lens
+- CodeLLDB (for debugging)
+
+#### IntelliJ IDEA / RustRover
+
+1. Install Rust plugin
+2. Import project as Cargo project
+3. Configure toolchain in Settings > Tools > Rust
+
+### Project Setup
+
 ```bash
-# Ubuntu/Debian - NVIDIA drivers + Vulkan SDK
-sudo apt-get install nvidia-driver-530 vulkan-tools
+# Clone repository
+git clone https://github.com/your-org/eris.git
+cd eris
 
-# Verify GPU detection
-nvidia-smi
-vulkaninfo | grep GPU
-```
+# Initialize submodules (if any)
+git submodule update --init
 
-### Recommended Tools
+# Build project
+cargo build
 
-```bash
-# Rust development tools
-cargo install cargo-expand         # View macro expansions
-cargo install cargo-audit          # Security auditing
-cargo install cargo-tree           # Dependency tree
-cargo install cargo-nextest        # Faster test runner
-cargo install grcov                # Code coverage
+# Run tests to verify setup
+cargo test --release
 
-# Performance tools
-sudo apt-get install valgrind perf linux-tools-common
-
-# Editor/IDE support
-# VSCode: rust-analyzer extension
-# IntelliJ: Intellij Rust plugin
+# Build documentation
+cargo doc --no-deps --open
 ```
 
 ## Project Setup

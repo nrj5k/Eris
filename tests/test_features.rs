@@ -1,6 +1,6 @@
 use eris::config::TierConfig;
 use eris::features::{
-    encode_state, hotness_score, AccessRecord, AccessTracker, BlobFeatures, HotnessConfig,
+    AccessRecord, AccessTracker, BlobFeatures, HotnessConfig, encode_state, hotness_score,
 };
 use eris::trace::{BlobData, IoOp};
 
@@ -259,12 +259,28 @@ fn test_blob_features_access_intervals() {
     let features = BlobFeatures::extract(&blob, &tracker, 5000, 10000.0, 100);
 
     // Intervals: 1000, 2000
-    // Mean: 1500
-    approx::assert_relative_eq!(features.mean_interval, 1500.0, epsilon = 1e-5);
+    // Mean: 1500, normalized: 1500 / 3,600,000
+    let expected_mean_normalized = 1500.0 / 3_600_000.0;
+    approx::assert_relative_eq!(
+        features.mean_interval as f64,
+        expected_mean_normalized,
+        epsilon = 1e-5
+    );
+    approx::assert_relative_eq!(
+        features.mean_interval,
+        expected_mean_normalized as f32,
+        epsilon = 1e-5
+    );
 
     // Std: sqrt(((1000-1500)^2 + (2000-1500)^2) / 1) = sqrt(500000) ≈ 707.107
-    let expected_std = (500_000.0_f64).sqrt() as f32;
-    approx::assert_relative_eq!(features.std_interval, expected_std, epsilon = 1e-3);
+    // Normalized: 707.107 / 3,600,000
+    let expected_std = (500_000.0_f64).sqrt();
+    let expected_std_normalized = expected_std / 3_600_000.0;
+    approx::assert_relative_eq!(
+        features.std_interval as f64,
+        expected_std_normalized,
+        epsilon = 1e-3
+    );
 }
 
 #[test]

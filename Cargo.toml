@@ -5,15 +5,20 @@ edition = "2024"
 
 [dependencies]
 postcard = { version = "1.1", features = ["alloc", "use-crc"] }
-burn = { version = "0.20.1", features = ["wgpu", "autodiff", "train"] }
+burn = { version = "0.20.1", features = ["wgpu", "autodiff", "train", "ndarray"] }
 chrono = "0.4.44"
+clap = { version = "4", features = ["derive"] }
 csv = "1.4.0"
 gymnasia = "2.0.0"
 hashbrown = "0.16.1"
+indicatif = "0.18"
+log = "0.4"
 memmap2 = "0.9.10"
 rand = "0.10.0"
+rand_pcg = "0.10.0"
 rand_distr = "0.6.0"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"

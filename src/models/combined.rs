@@ -1,5 +1,4 @@
 use burn::{config::Config, module::Module, prelude::*};
-use rand::Rng;
 
 use crate::models::{ContextualBandit, ContextualBanditConfig, QNetwork, QNetworkConfig};
 use crate::tier::TierSelector;
@@ -40,11 +39,42 @@ impl CombinedModelConfig {
     ///
     /// # Returns
     /// Initialized CombinedModel with random weights
+    ///
+    /// # Deprecation Notice
+    ///
+    /// This config type is deprecated. Use `eris::config::CombinedBanditDQNConfig` instead:
+    /// ```rust,ignore
+    /// use eris::model::ErisDefaults;
+    /// use eris::training::mock_env::MockEnv;
+    ///
+    /// // Option 1: Use defaults with dynamic dimensions
+    /// let env = MockEnv::new_with_dims(100, 50, 20);
+    /// let state_dim = env.observation_space().dim();
+    /// let action_dim = env.action_space().n;
+    /// let config = ErisDefaults::storage_tier_model(state_dim, action_dim);
+    ///
+    /// // Option 2: Build manually with dynamic dimensions
+    /// use eris::config::{BanditConfig, DQNConfig, CombinedBanditDQNConfig};
+    ///
+    /// let feature_dim = 20;
+    /// let config = CombinedBanditDQNConfig::builder()
+    ///     .bandit(BanditConfig::builder().input_dim(state_dim).hidden_layers(vec![64, 128]).feature_dim(feature_dim).build()?)
+    ///     .dqn(DQNConfig::builder().input_dim(feature_dim).hidden_layers(vec![128, 128]).action_dim(action_dim).build()?)
+    ///     .build()?;
+    /// ```
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use `eris::config::CombinedBanditDQNConfig` or `eris::model::ErisDefaults` instead"
+    )]
     pub fn init<B: Backend>(&self, device: &B::Device) -> CombinedModel<B> {
+        log::warn!(
+            "CombinedModelConfig is deprecated. Use eris::config::CombinedBanditDQNConfig or eris::model::ErisDefaults"
+        );
+
         CombinedModel {
             bandit: ContextualBanditConfig::new(
                 self.state_dim,
-                self.hidden_dim / 2,
+                self.state_dim, // Use state_dim for bandit, not hidden_dim/2
                 self.feature_dim,
             )
             .init(device),
@@ -67,7 +97,7 @@ impl<B: Backend> CombinedModel<B> {
     ///   - q_values: [batch_size, action_dim]
     pub fn forward(&self, state: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>, Tensor<B, 2>) {
         // Step 1: Bandit extracts features + importance score
-        let (features, importance) = self.bandit.forward(state);
+        let (features, importance) = self.bandit.forward(state.clone());
 
         // Step 2: Q-network predicts Q-values from enhanced features
         let q_values = self.qnetwork.forward(features.clone());
@@ -91,9 +121,12 @@ impl<B: Backend> CombinedModel<B> {
         tier_selector: &TierSelector,
         epsilon: f32,
     ) -> usize {
-        let mut rng = rand::rng();
+        use rand::prelude::*;
+        use rand::rng;
 
-        if rng.random::<f32>() < epsilon {
+        let mut rng = rng();
+
+        if rng.random_range(0.0f32..1.0) < epsilon {
             // Exploration: random action
             rng.random_range(0..10)
         } else {
@@ -101,7 +134,12 @@ impl<B: Backend> CombinedModel<B> {
             let (_, importance, q_values) = self.forward(state);
 
             // Get importance score as scalar (batch_size=1, output_dim=1)
-            let importance_val: f32 = importance.into_data().convert::<f32>().value[0];
+            let importance_vec: Vec<f32> = importance
+                .into_data()
+                .convert::<f32>()
+                .to_vec()
+                .expect("Failed to convert importance to vec");
+            let importance_val = importance_vec[0];
 
             // Map importance to tier via capacity-weighted distribution
             let tier_idx = tier_selector.select_tier(importance_val);
@@ -117,7 +155,12 @@ impl<B: Backend> CombinedModel<B> {
             let argmax_idx = tier_q_values.argmax(1);
 
             // Convert to scalar
-            let op_idx: i64 = argmax_idx.into_data().convert::<i64>().value[0];
+            let op_idx_vec: Vec<i64> = argmax_idx
+                .into_data()
+                .convert::<i64>()
+                .to_vec()
+                .expect("Failed to convert argmax to vec");
+            let op_idx = op_idx_vec[0];
 
             // Encode action: tier * 2 + op
             tier_idx * 2 + op_idx as usize
