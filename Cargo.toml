@@ -3,17 +3,11 @@ name = "eris"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = ["cpu"]
-cpu = ["burn/ndarray"]
-gpu = ["burn/wgpu"]
-nvidia = ["burn/cuda"]
-amd = ["burn/rocm"]
-
 [dependencies]
 postcard = { version = "1.1", features = ["alloc", "use-crc"] }
 burn = { version = "0.20", features = [
   "wgpu",
+  "rocm",
   "autodiff",
   "train",
   "ndarray",

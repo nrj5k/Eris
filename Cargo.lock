@@ -291,7 +291,6 @@ checksum = "b78ff10ed98b73e1d477ea6e6e1ec1b9cf9f71a17afc3fea9f4dca482d43dcd4"
 dependencies = [
  "burn-autodiff",
  "burn-core",
- "burn-cuda",
  "burn-ndarray",
  "burn-nn",
  "burn-optim",
@@ -398,17 +397,6 @@ dependencies = [
  "cubek",
  "derive-new",
  "serde",
-]
-
-[[package]]
-name = "burn-cuda"
-version = "0.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d0c68cf653eb9c27dcbe046bb7b04cc18c6b33afda4c09317c102e6f4ae7cb6"
-dependencies = [
- "burn-backend",
- "burn-cubecl",
- "cubecl",
 ]
 
 [[package]]

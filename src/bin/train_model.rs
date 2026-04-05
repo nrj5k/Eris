@@ -29,10 +29,6 @@ struct Args {
     /// Learning rate
     #[arg(short, long, default_value = "0.001")]
     learning_rate: f64,
-
-    /// Backend: cpu, gpu, cuda, rocm
-    #[arg(short, long, default_value = "cpu")]
-    backend: String,
 }
 
 // ============================================================================
@@ -47,7 +43,6 @@ fn main() {
     println!("Max steps: {}", args.max_steps);
     println!("Batch size: {}", args.batch_size);
     println!("Learning rate: {}", args.learning_rate);
-    println!("Backend: {}", args.backend);
     println!();
 
     // Spawn training in a thread with increased stack size (512MB for Burn)
@@ -67,16 +62,72 @@ fn main() {
 }
 
 // ============================================================================
+// BACKEND SELECTION
+// ============================================================================
+
+/// Generic training function that dispatches to the correct backend.
+fn train_model_generic(args: &Args) -> Result<(), String> {
+    let model_type = args.model.as_str();
+    println!("Initializing {} training...", model_type);
+    eprintln!("DEBUG: Starting train_model_generic for {}", model_type);
+
+    // Setup device and backend based on compiled features
+    #[cfg(feature = "cpu")]
+    {
+        use burn::backend::Autodiff;
+        use burn::backend::NdArray;
+        type B = Autodiff<NdArray>;
+        let device = <NdArray as burn::tensor::backend::Backend>::Device::default();
+        println!("Using CPU (NdArray) backend");
+        run_training::<B>(args, device)
+    }
+
+    #[cfg(feature = "gpu")]
+    {
+        use burn::backend::wgpu::WgpuDevice;
+        use burn::backend::Autodiff;
+        use burn::backend::Wgpu;
+        type B = Autodiff<Wgpu>;
+        let device = WgpuDevice::DiscreteGpu(0);
+        println!("Using GPU (Wgpu) backend");
+        run_training::<B>(args, device)
+    }
+
+    #[cfg(feature = "nvidia")]
+    {
+        use burn::backend::cuda::CudaDevice;
+        use burn::backend::Autodiff;
+        use burn::backend::Cuda;
+        type B = Autodiff<Cuda>;
+        let device = CudaDevice::new(0);
+        println!("Using CUDA (NVIDIA) backend");
+        run_training::<B>(args, device)
+    }
+
+    #[cfg(feature = "amd")]
+    {
+        use burn::backend::rocm::RocmDevice;
+        use burn::backend::Autodiff;
+        use burn::backend::Rocm;
+        type B = Autodiff<Rocm>;
+        let device = RocmDevice::new(0);
+        println!("Using ROCm (AMD) backend");
+        run_training::<B>(args, device)
+    }
+}
+
+// ============================================================================
 // GENERIC TRAIN FUNCTION
 // ============================================================================
 
-/// Generic training function that works with any model type.
+/// Generic training function that works with any backend.
 ///
-/// This function handles the common training loop for all model types,
+/// This function handles the common training loop for all model types and backends,
 /// while delegating model-specific setup to specialized functions.
-fn train_model_generic(args: &Args) -> Result<(), String> {
-    use burn::backend::{Autodiff, NdArray};
-    use burn::tensor::backend::Backend;
+fn run_training<B: burn::tensor::backend::AutodiffBackend>(
+    args: &Args,
+    device: B::Device,
+) -> Result<(), String> {
     use eris::env::Environment;
     use eris::env::IOBufferEnv;
     use eris::space::Space;
@@ -84,14 +135,6 @@ fn train_model_generic(args: &Args) -> Result<(), String> {
     use std::path::Path;
 
     let model_type = args.model.as_str();
-    println!("Initializing {} training...", model_type);
-    eprintln!("DEBUG: Starting train_model_generic for {}", model_type);
-
-    // Setup device and backend
-    type B = Autodiff<NdArray>;
-    eprintln!("DEBUG: Creating device");
-    let device = <NdArray as Backend>::Device::default();
-    eprintln!("DEBUG: Device created");
 
     // Create environment
     let config_path = Path::new("config/tiers.toml");
@@ -280,14 +323,31 @@ fn setup_dqn_agent<B: burn::tensor::backend::AutodiffBackend>(
     action_dim: usize,
     device: &B::Device,
 ) -> Result<CombinedAgent<B>, Box<dyn std::error::Error>> {
-    use eris::models::CombinedModelConfig;
+    use eris::config::{BanditConfig, CombinedBanditDQNConfig, DQNConfig};
+    use eris::model::Activation;
     use eris::training::{CombinedAgent, TrainingConfig};
 
-    // Legacy model config (CombinedAgent still uses deprecated config)
+    // DQN architecture: bandit extracts features, DQN predicts Q-values
     let feature_dim = 20;
-    let hidden_dim = 128;
-    #[allow(deprecated)]
-    let model_config = CombinedModelConfig::new(state_dim, feature_dim, hidden_dim, action_dim);
+
+    let bandit_config = BanditConfig::builder()
+        .input_dim(state_dim)
+        .hidden_layers(vec![64, 128])
+        .feature_dim(feature_dim)
+        .activation(Activation::Sigmoid)
+        .build()?;
+
+    let dqn_config = DQNConfig::builder()
+        .input_dim(feature_dim)
+        .hidden_layers(vec![128, 128])
+        .action_dim(action_dim)
+        .dueling(true)
+        .build()?;
+
+    let model_config = CombinedBanditDQNConfig::builder()
+        .bandit(bandit_config)
+        .dqn(dqn_config)
+        .build()?;
 
     let training_config = TrainingConfig {
         learning_rate: args.learning_rate,
@@ -310,31 +370,129 @@ fn setup_dqn_agent<B: burn::tensor::backend::AutodiffBackend>(
 }
 
 /// Setup Contextual Bandit agent.
-/// TODO: Implement CBandit-specific setup
+///
+/// CBandit focuses on feature extraction and action importance scores,
+/// not Q-value prediction like DQN.
 fn setup_cbandit_agent<B: burn::tensor::backend::AutodiffBackend>(
     args: &Args,
     state_dim: usize,
     action_dim: usize,
     device: &B::Device,
 ) -> Result<CombinedAgent<B>, Box<dyn std::error::Error>> {
-    // For now, use DQN setup as placeholder
-    // TODO: Implement CBandit-specific model and agent
-    println!("Note: CBandit not fully implemented, using DQN-like setup");
-    setup_dqn_agent(args, state_dim, action_dim, device)
+    use eris::config::{BanditConfig, CombinedBanditDQNConfig, DQNConfig};
+    use eris::training::TrainingConfig;
+
+    println!("Setting up Contextual Bandit model...");
+
+    // Bandit architecture: feature_dim = action_dim for importance scores
+    let feature_dim = action_dim;
+
+    let bandit_config = BanditConfig::builder()
+        .input_dim(state_dim)
+        .hidden_layers(vec![64, 128])
+        .feature_dim(feature_dim)
+        .build()?;
+
+    let dqn_config = DQNConfig::builder()
+        .input_dim(feature_dim)
+        .hidden_layers(vec![128, 128])
+        .action_dim(action_dim)
+        .dueling(true)
+        .build()?;
+
+    let model_config = CombinedBanditDQNConfig::builder()
+        .bandit(bandit_config)
+        .dqn(dqn_config)
+        .build()?;
+
+    // Bandit-specific training config:
+    // - gamma = 0: No discount, immediate reward only
+    // - Less epsilon exploration (bandit converges faster)
+    // - No target network updates
+    let training_config = TrainingConfig {
+        learning_rate: args.learning_rate,
+        gamma: 0.0,
+        epsilon_start: 0.5,
+        epsilon_end: 0.01,
+        epsilon_decay: 0.99,
+        batch_size: args.batch_size,
+        buffer_capacity: 10_000,
+        target_update_freq: 0,
+        tau: 0.0,
+        backend: "ndarray".to_string(),
+        checkpoint_interval: 10,
+        max_gradient_norm: 1.0,
+    };
+
+    let agent = CombinedAgent::new(training_config, model_config, device.clone());
+
+    println!("✅ Contextual Bandit agent ready!");
+    println!("  Input: {} features", state_dim);
+    println!("  Output: {} action importance scores", action_dim);
+    println!("  Architecture: Bandit(64→128→{})", action_dim);
+
+    Ok(agent)
 }
 
-/// Setup Combined agent.
-/// TODO: Implement Combined-specific setup
 fn setup_combined_agent<B: burn::tensor::backend::AutodiffBackend>(
     args: &Args,
     state_dim: usize,
     action_dim: usize,
     device: &B::Device,
 ) -> Result<CombinedAgent<B>, Box<dyn std::error::Error>> {
-    // For now, use DQN setup as placeholder
-    // TODO: Implement Combined-specific model and agent
-    println!("Note: Combined model not fully implemented, using DQN-like setup");
-    setup_dqn_agent(args, state_dim, action_dim, device)
+    use eris::config::{BanditConfig, CombinedBanditDQNConfig, DQNConfig};
+    use eris::training::TrainingConfig;
+
+    println!("Setting up Combined Model (Bandit + DQN)...");
+    println!("  Bandit: Extracts features from state");
+    println!("  DQN: Learns Q-values from bandit features");
+
+    // Bandit for feature extraction
+    let bandit_config = BanditConfig::builder()
+        .input_dim(state_dim)
+        .hidden_layers(vec![64, 128])
+        .feature_dim(20) // Compressed feature representation
+        .build()?;
+
+    // DQN for Q-learning from bandit features
+    let dqn_config = DQNConfig::builder()
+        .input_dim(20) // Takes bandit output as input
+        .action_dim(action_dim)
+        .hidden_layers(vec![128, 128])
+        .dueling(true)
+        .build()?;
+
+    // Combined model with both bandit and DQN
+    let model_config = CombinedBanditDQNConfig::builder()
+        .bandit(bandit_config)
+        .dqn(dqn_config)
+        .build()?;
+
+    // Training config (DQN-style with full reinforcement learning)
+    let training_config = TrainingConfig {
+        learning_rate: args.learning_rate,
+        gamma: 0.99, // Standard DQN discount
+        epsilon_start: 1.0,
+        epsilon_end: 0.01,
+        epsilon_decay: 0.995,
+        batch_size: args.batch_size,
+        buffer_capacity: 10_000,
+        target_update_freq: 10, // Standard DQN target updates
+        tau: 0.005,
+        backend: "ndarray".to_string(),
+        checkpoint_interval: 10,
+        max_gradient_norm: 1.0,
+    };
+
+    let agent = CombinedAgent::<B>::new(training_config, model_config, device.clone());
+
+    println!("✅ Combined agent ready!");
+    println!("  State dim: {}", state_dim);
+    println!("  Bandit: {} → [64,128] → 20 features", state_dim);
+    println!("  DQN: 20 → [128,128] → {} Q-values", action_dim);
+    println!("  Total params: Bandit + DQN");
+
+    Ok(agent)
 }
 
 // ============================================================================

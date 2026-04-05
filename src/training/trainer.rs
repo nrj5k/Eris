@@ -31,7 +31,8 @@ use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
 use std::path::Path;
 
-use crate::models::{CombinedModel, CombinedModelConfig};
+use crate::config::CombinedBanditDQNConfig;
+use crate::models::CombinedModel;
 use crate::training::checkpoint::{CheckpointMetadata, DQNCheckpointHelper};
 use crate::training::replay_buffer::{ReplayBuffer, TransitionBatch};
 
@@ -119,7 +120,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
     /// Initialized agent with random weights and empty buffer
     pub fn new(
         config: TrainingConfig,
-        model_config: CombinedModelConfig,
+        model_config: CombinedBanditDQNConfig,
         device: B::Device,
     ) -> Self {
         let model = model_config.init(&device);
@@ -339,7 +340,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
     pub fn load_checkpoint<P: AsRef<Path>>(
         path: P,
         config: TrainingConfig,
-        model_config: CombinedModelConfig,
+        model_config: CombinedBanditDQNConfig,
         device: B::Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Extract directory and name from path
