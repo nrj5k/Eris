@@ -2,9 +2,31 @@
 //!
 //! Usage:
 //!   train_model --model dqn --episodes 100 --max-steps 100
+//!
+//! NOTE: Backend selection is done via Cargo features (compile-time):
+//!   cargo run --bin train_model --features cpu-only -- --model dqn
+//!   cargo run --bin train_model --features wgpu-only -- --model dqn
+//!
+//! The --backend CLI flag validates that you're using the expected backend.
 
 use clap::Parser;
 use eris::training::CombinedAgent;
+
+// ============================================================================
+// BACKEND TYPE DEFINITIONS (Compile-time selection)
+// ============================================================================
+
+#[cfg(feature = "cpu-only")]
+type Backend = burn::backend::NdArray<f32>;
+
+#[cfg(feature = "wgpu-only")]
+type Backend = burn::backend::Wgpu<f32, i32>;
+
+#[cfg(feature = "cuda-only")]
+type Backend = burn::backend::Cuda<f32, i32>;
+
+#[cfg(feature = "rocm-only")]
+type Backend = burn::backend::Rocm<f32, i32>;
 
 #[derive(Parser, Clone)]
 #[command(name = "train_model")]
@@ -29,6 +51,10 @@ struct Args {
     /// Learning rate
     #[arg(short, long, default_value = "0.001")]
     learning_rate: f64,
+
+    /// Backend selection (informational - validates against compiled backend)
+    #[arg(long, default_value = "cpu")]
+    backend: String,
 }
 
 // ============================================================================
@@ -38,11 +64,26 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
+    // Validate backend arg matches compiled backend
+    let compiled_backend = get_compiled_backend();
+    if args.backend.to_lowercase() != compiled_backend {
+        eprintln!(
+            "Error: Requested backend '{}' doesn't match compiled backend '{}'",
+            args.backend, compiled_backend
+        );
+        eprintln!(
+            "Recompile with: cargo build --features {}-only",
+            args.backend.to_lowercase()
+        );
+        std::process::exit(1);
+    }
+
     println!("=== Training Model: {} ===", args.model);
     println!("Episodes: {}", args.episodes);
     println!("Max steps: {}", args.max_steps);
     println!("Batch size: {}", args.batch_size);
     println!("Learning rate: {}", args.learning_rate);
+    println!("Backend: {} ✓", compiled_backend);
     println!();
 
     // Spawn training in a thread with increased stack size (512MB for Burn)
@@ -65,6 +106,39 @@ fn main() {
 // BACKEND SELECTION
 // ============================================================================
 
+/// Get compiled backend name
+fn get_compiled_backend() -> &'static str {
+    #[cfg(feature = "cpu-only")]
+    {
+        "cpu"
+    }
+
+    #[cfg(feature = "wgpu-only")]
+    {
+        "wgpu"
+    }
+
+    #[cfg(feature = "cuda-only")]
+    {
+        "cuda"
+    }
+
+    #[cfg(feature = "rocm-only")]
+    {
+        "rocm"
+    }
+
+    #[cfg(not(any(
+        feature = "cpu-only",
+        feature = "wgpu-only",
+        feature = "cuda-only",
+        feature = "rocm-only"
+    )))]
+    {
+        "none"
+    }
+}
+
 /// Generic training function that dispatches to the correct backend.
 fn train_model_generic(args: &Args) -> Result<(), String> {
     let model_type = args.model.as_str();
@@ -72,47 +146,58 @@ fn train_model_generic(args: &Args) -> Result<(), String> {
     eprintln!("DEBUG: Starting train_model_generic for {}", model_type);
 
     // Setup device and backend based on compiled features
-    #[cfg(feature = "cpu")]
+    #[cfg(feature = "cpu-only")]
     {
+        use burn::backend::ndarray::NdArrayDevice;
         use burn::backend::Autodiff;
-        use burn::backend::NdArray;
-        type B = Autodiff<NdArray>;
-        let device = <NdArray as burn::tensor::backend::Backend>::Device::default();
-        println!("Using CPU (NdArray) backend");
-        run_training::<B>(args, device)
+
+        type AutodiffBackend = Autodiff<Backend>;
+        let device = NdArrayDevice::default();
+        println!("Running on CPU (NdArray)");
+        run_training::<AutodiffBackend>(args, device)
     }
 
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "wgpu-only")]
     {
         use burn::backend::wgpu::WgpuDevice;
         use burn::backend::Autodiff;
-        use burn::backend::Wgpu;
-        type B = Autodiff<Wgpu>;
-        let device = WgpuDevice::DiscreteGpu(0);
-        println!("Using GPU (Wgpu) backend");
-        run_training::<B>(args, device)
+
+        type AutodiffBackend = Autodiff<Backend>;
+        let device = WgpuDevice::default();
+        println!("Running on GPU (Wgpu)");
+        run_training::<AutodiffBackend>(args, device)
     }
 
-    #[cfg(feature = "nvidia")]
+    #[cfg(feature = "cuda-only")]
     {
         use burn::backend::cuda::CudaDevice;
         use burn::backend::Autodiff;
-        use burn::backend::Cuda;
-        type B = Autodiff<Cuda>;
-        let device = CudaDevice::new(0);
-        println!("Using CUDA (NVIDIA) backend");
-        run_training::<B>(args, device)
+
+        type AutodiffBackend = Autodiff<Backend>;
+        let device = CudaDevice::default();
+        println!("Running on CUDA");
+        run_training::<AutodiffBackend>(args, device)
     }
 
-    #[cfg(feature = "amd")]
+    #[cfg(feature = "rocm-only")]
     {
         use burn::backend::rocm::RocmDevice;
         use burn::backend::Autodiff;
-        use burn::backend::Rocm;
-        type B = Autodiff<Rocm>;
-        let device = RocmDevice::new(0);
-        println!("Using ROCm (AMD) backend");
-        run_training::<B>(args, device)
+
+        type AutodiffBackend = Autodiff<Backend>;
+        let device = RocmDevice::default();
+        println!("Running on ROCm");
+        run_training::<AutodiffBackend>(args, device)
+    }
+
+    #[cfg(not(any(
+        feature = "cpu-only",
+        feature = "wgpu-only",
+        feature = "cuda-only",
+        feature = "rocm-only"
+    )))]
+    {
+        Err("No backend feature enabled. Please compile with: --features cpu-only|wgpu-only|cuda-only|rocm-only".to_string())
     }
 }
 
@@ -121,9 +206,6 @@ fn train_model_generic(args: &Args) -> Result<(), String> {
 // ============================================================================
 
 /// Generic training function that works with any backend.
-///
-/// This function handles the common training loop for all model types and backends,
-/// while delegating model-specific setup to specialized functions.
 fn run_training<B: burn::tensor::backend::AutodiffBackend>(
     args: &Args,
     device: B::Device,
@@ -170,7 +252,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
     println!("Model: {}", model_type);
     println!();
 
-    // GENERIC TRAINING LOOP - same for all model types
+    // GENERIC TRAINING LOOP
     let mut episode_rewards = Vec::with_capacity(args.episodes);
 
     for episode in 0..args.episodes {
@@ -234,7 +316,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
             let checkpoint_path = format!("checkpoints/{}_episode_{}", model_type, episode + 1);
             save_checkpoint(&agent, &checkpoint_path, episode + 1, avg_reward as f32)
                 .map_err(|e| format!("Failed to save checkpoint: {}", e))?;
-            println!("  💾 Saved checkpoint: {}.mpk", checkpoint_path);
+            println!("  Saved checkpoint: {}.mpk", checkpoint_path);
         }
     }
 
@@ -245,7 +327,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
         .map_err(|e| format!("Failed to save final checkpoint: {}", e))?;
 
     // PRINT SUMMARY
-    println!("\n✅ Training complete!");
+    println!("\nTraining complete!");
     println!("Model: {}", model_type);
     println!("Total episodes: {}", args.episodes);
     println!("Average reward: {:.2}", avg_reward);
@@ -260,7 +342,6 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
 // ============================================================================
 
 /// Select action using epsilon-greedy policy.
-/// This is shared across all model types using the CombinedModel's select_action.
 fn select_action<B: burn::tensor::backend::AutodiffBackend>(
     agent: &CombinedAgent<B>,
     state: &[f64],
@@ -276,7 +357,6 @@ fn select_action<B: burn::tensor::backend::AutodiffBackend>(
 
     // Epsilon-greedy: random action with probability epsilon
     if rand::random::<f32>() < epsilon {
-        // Random action: uniform over action space
         let action_space = env.action_space();
         return rand::rng().random_range(0..action_space.n);
     }
@@ -287,26 +367,22 @@ fn select_action<B: burn::tensor::backend::AutodiffBackend>(
     let state_tensor: Tensor<B, 2> = Tensor::from_data(state_data.convert::<f32>(), &agent.device);
 
     // Create TierSelector for action mapping
-    // Load tier configs from file
     let config_path = Path::new("config/tiers.toml");
     let tier_configs = match Config::from_file(config_path) {
         Ok(cfg) => cfg.tier,
-        Err(_) => {
-            // Fallback: create default tiers
-            (0..5)
-                .map(|i| eris::config_old::TierConfig {
-                    name: format!("tier_{}", i),
-                    tier_id: i as u32,
-                    capacity: 100.0,
-                    access_latency: 0.01,
-                    description: String::new(),
-                })
-                .collect()
-        }
+        Err(_) => (0..5)
+            .map(|i| eris::config_old::TierConfig {
+                name: format!("tier_{}", i),
+                tier_id: i as u32,
+                capacity: 100.0,
+                access_latency: 0.01,
+                description: String::new(),
+            })
+            .collect(),
     };
     let tier_selector = TierSelector::new(tier_configs.into_iter().map(Tier::new).collect());
 
-    // Forward pass through model using select_action
+    // Forward pass through model
     agent
         .model
         .select_action(state_tensor, &tier_selector, epsilon)
@@ -316,7 +392,6 @@ fn select_action<B: burn::tensor::backend::AutodiffBackend>(
 // MODEL-SPECIFIC SETUP
 // ============================================================================
 
-/// Setup DQN agent with configuration from args.
 fn setup_dqn_agent<B: burn::tensor::backend::AutodiffBackend>(
     args: &Args,
     state_dim: usize,
@@ -327,7 +402,6 @@ fn setup_dqn_agent<B: burn::tensor::backend::AutodiffBackend>(
     use eris::model::Activation;
     use eris::training::{CombinedAgent, TrainingConfig};
 
-    // DQN architecture: bandit extracts features, DQN predicts Q-values
     let feature_dim = 20;
 
     let bandit_config = BanditConfig::builder()
@@ -369,10 +443,6 @@ fn setup_dqn_agent<B: burn::tensor::backend::AutodiffBackend>(
     Ok(agent)
 }
 
-/// Setup Contextual Bandit agent.
-///
-/// CBandit focuses on feature extraction and action importance scores,
-/// not Q-value prediction like DQN.
 fn setup_cbandit_agent<B: burn::tensor::backend::AutodiffBackend>(
     args: &Args,
     state_dim: usize,
@@ -384,7 +454,6 @@ fn setup_cbandit_agent<B: burn::tensor::backend::AutodiffBackend>(
 
     println!("Setting up Contextual Bandit model...");
 
-    // Bandit architecture: feature_dim = action_dim for importance scores
     let feature_dim = action_dim;
 
     let bandit_config = BanditConfig::builder()
@@ -405,10 +474,6 @@ fn setup_cbandit_agent<B: burn::tensor::backend::AutodiffBackend>(
         .dqn(dqn_config)
         .build()?;
 
-    // Bandit-specific training config:
-    // - gamma = 0: No discount, immediate reward only
-    // - Less epsilon exploration (bandit converges faster)
-    // - No target network updates
     let training_config = TrainingConfig {
         learning_rate: args.learning_rate,
         gamma: 0.0,
@@ -426,10 +491,9 @@ fn setup_cbandit_agent<B: burn::tensor::backend::AutodiffBackend>(
 
     let agent = CombinedAgent::new(training_config, model_config, device.clone());
 
-    println!("✅ Contextual Bandit agent ready!");
+    println!("Contextual Bandit agent ready!");
     println!("  Input: {} features", state_dim);
     println!("  Output: {} action importance scores", action_dim);
-    println!("  Architecture: Bandit(64→128→{})", action_dim);
 
     Ok(agent)
 }
@@ -444,40 +508,34 @@ fn setup_combined_agent<B: burn::tensor::backend::AutodiffBackend>(
     use eris::training::TrainingConfig;
 
     println!("Setting up Combined Model (Bandit + DQN)...");
-    println!("  Bandit: Extracts features from state");
-    println!("  DQN: Learns Q-values from bandit features");
 
-    // Bandit for feature extraction
     let bandit_config = BanditConfig::builder()
         .input_dim(state_dim)
         .hidden_layers(vec![64, 128])
-        .feature_dim(20) // Compressed feature representation
+        .feature_dim(20)
         .build()?;
 
-    // DQN for Q-learning from bandit features
     let dqn_config = DQNConfig::builder()
-        .input_dim(20) // Takes bandit output as input
+        .input_dim(20)
         .action_dim(action_dim)
         .hidden_layers(vec![128, 128])
         .dueling(true)
         .build()?;
 
-    // Combined model with both bandit and DQN
     let model_config = CombinedBanditDQNConfig::builder()
         .bandit(bandit_config)
         .dqn(dqn_config)
         .build()?;
 
-    // Training config (DQN-style with full reinforcement learning)
     let training_config = TrainingConfig {
         learning_rate: args.learning_rate,
-        gamma: 0.99, // Standard DQN discount
+        gamma: 0.99,
         epsilon_start: 1.0,
         epsilon_end: 0.01,
         epsilon_decay: 0.995,
         batch_size: args.batch_size,
         buffer_capacity: 10_000,
-        target_update_freq: 10, // Standard DQN target updates
+        target_update_freq: 10,
         tau: 0.005,
         backend: "ndarray".to_string(),
         checkpoint_interval: 10,
@@ -486,11 +544,10 @@ fn setup_combined_agent<B: burn::tensor::backend::AutodiffBackend>(
 
     let agent = CombinedAgent::<B>::new(training_config, model_config, device.clone());
 
-    println!("✅ Combined agent ready!");
+    println!("Combined agent ready!");
     println!("  State dim: {}", state_dim);
-    println!("  Bandit: {} → [64,128] → 20 features", state_dim);
-    println!("  DQN: 20 → [128,128] → {} Q-values", action_dim);
-    println!("  Total params: Bandit + DQN");
+    println!("  Bandit: {} -> [64,128] -> 20 features", state_dim);
+    println!("  DQN: 20 -> [128,128] -> {} Q-values", action_dim);
 
     Ok(agent)
 }
@@ -499,7 +556,6 @@ fn setup_combined_agent<B: burn::tensor::backend::AutodiffBackend>(
 // CHECKPOINT SAVING
 // ============================================================================
 
-/// Save checkpoint using agent's save_checkpoint method.
 fn save_checkpoint<B: burn::tensor::backend::AutodiffBackend>(
     agent: &CombinedAgent<B>,
     path: &str,
@@ -508,10 +564,7 @@ fn save_checkpoint<B: burn::tensor::backend::AutodiffBackend>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::fs;
 
-    // Ensure checkpoints directory exists
     fs::create_dir_all("checkpoints")?;
-
-    // Use agent's save_checkpoint method
     agent.save_checkpoint(path, episode, avg_reward)?;
 
     Ok(())
@@ -543,5 +596,12 @@ mod tests {
         assert_eq!(args.episodes, 100);
         assert_eq!(args.max_steps, 100);
         assert_eq!(args.batch_size, 512);
+    }
+
+    #[test]
+    fn test_compiled_backend() {
+        let backend = get_compiled_backend();
+        // Should be one of the valid backends
+        assert!(["cpu", "wgpu", "cuda", "rocm", "none"].contains(&backend));
     }
 }
