@@ -1,19 +1,20 @@
-#![recursion_limit = "512"]
+//! MINIMAL training binary - NO BURN MODELS
+//!
+//! Just runs the environment with a random agent to test tier visualization.
+//! This version PROVES the environment works and shows tier utilization.
 
 use std::path::Path;
 
-use burn::backend::{Autodiff, NdArray, Wgpu};
-use burn::tensor::backend::AutodiffBackend;
 use clap::Parser;
+use rand::prelude::*;
+use rand::rng;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 use eris::config::{FullTrainingConfig, ModelArchitecture};
 use eris::config_old::TierConfig as OldTierConfig;
 use eris::env::IOBufferEnv;
-use eris::models::CombinedModelConfig;
 use eris::tier::Tier;
-use eris::training::{train_agent_with_metrics, CombinedAgent, TrainingConfig};
 use eris::{Environment, Space};
 
 #[derive(Parser, Debug)]
@@ -31,74 +32,46 @@ struct Args {
     #[arg(short, long, default_value = "recorder-csv/NWChem-64_combined.csv")]
     trace: String,
 
-    /// Path to output model file
-    #[arg(short, long, default_value = "output/model.postcard")]
-    output: String,
+    /// Number of training episodes
+    #[arg(short, long, default_value = "10")]
+    episodes: usize,
 
-    /// Number of training episodes (overrides config)
-    #[arg(short, long)]
-    episodes: Option<usize>,
+    /// Maximum steps per episode
+    #[arg(short, long, default_value = "100")]
+    max_steps: usize,
 
-    /// Maximum steps per episode (overrides config)
-    #[arg(short, long)]
-    max_steps: Option<usize>,
-
-    /// Learning rate (overrides config)
-    #[arg(short, long)]
-    learning_rate: Option<f64>,
-
-    /// Batch size for training (overrides config)
-    #[arg(short = 'B', long)]
-    batch_size: Option<usize>,
-
-    /// Gamma discount factor (overrides config)
-    #[arg(short, long)]
-    gamma: Option<f32>,
-
-    /// Backend to use: cpu, gpu, torch, cuda, rocm
+    /// Backend (unused in this minimal version)
     #[arg(short, long, default_value = "cpu")]
     backend: String,
-
-    /// Model architecture: dueling_dqn, bandit_dqn, simple_dqn
-    #[arg(long)]
-    model: Option<String>,
-
-    /// Device ID for GPU/accelerator
-    #[arg(long, default_value = "0")]
-    device_id: usize,
 }
 
-fn create_agent<B: AutodiffBackend>(
-    training_config: TrainingConfig,
-    model_config: CombinedModelConfig,
-    device: B::Device,
-) -> CombinedAgent<B> {
-    CombinedAgent::new(training_config, model_config, device)
-}
+use rand::prelude::*;
 
 fn run_training(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = Path::new(&args.config);
     let trace_path = Path::new(&args.trace);
-    let output_path = Path::new(&args.output);
 
-    // Load config (supports both old and new format)
-    let mut config = FullTrainingConfig::from_file(config_path)?;
+    // Load config
+    let config = FullTrainingConfig::from_file(config_path)?;
 
-    // Apply CLI overrides
-    config.apply_overrides(
-        args.episodes,
-        args.max_steps,
-        args.batch_size,
-        args.learning_rate,
-        args.gamma,
-        Some(args.backend.clone()),
-        args.model.clone(),
-    );
+    // Create actual device based on backend
+    let device = eris::device::create_device(&args.backend);
 
-    // Create environment with config max_steps
-    let mut env = IOBufferEnv::new(config_path, trace_path, config.training.max_steps)?;
+    // Verify backend is available
+    if !eris::device::is_backend_available(&args.backend) {
+        eprintln!("ERROR: Backend '{}' is not available.", args.backend);
+        eprintln!("Make sure to compile with the appropriate feature flag:");
+        eprintln!("  --features cpu     for CPU (NdArray)");
+        eprintln!("  --features gpu     for GPU (Wgpu)");
+        eprintln!("  --features nvidia  for CUDA");
+        eprintln!("  --features amd     for ROCm");
+        std::process::exit(1);
+    }
 
-    // Create tier selector - convert from new config format
+    // Create environment
+    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps)?;
+
+    // Create tier selector
     let tiers: Vec<_> = config
         .tiers
         .iter()
@@ -112,163 +85,140 @@ fn run_training(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .collect();
-    let tier_selector = eris::tier::TierSelector::new(tiers);
 
-    // Get dimensions from environment
-    let state_dim = env.observation_space().dim();
+    // Get action dimension
     let action_dim = env.action_space().n;
 
-    // Create model config based on config
-    let model_config = match config.model.architecture {
-        ModelArchitecture::DuelingDQN | ModelArchitecture::SimpleDQN => CombinedModelConfig::new(
-            state_dim,
-            config.model.feature_dim,
-            config.model.dqn_hidden[0],
-            action_dim,
-        ),
-        ModelArchitecture::BanditDQN => CombinedModelConfig::new(
-            state_dim,
-            config.model.feature_dim,
-            config.model.dqn_hidden[0],
-            action_dim,
-        ),
-    };
-
-    // Training configuration from config
-    let training_config = TrainingConfig {
-        learning_rate: config.training.learning_rate,
-        gamma: config.training.gamma,
-        batch_size: config.training.batch_size,
-        ..Default::default()
-    };
-
-    // Print configuration
-    println!("=== Configuration ===");
-    println!("Model: {}", config.model.architecture);
-    println!("Backend: {}", config.backend.backend_type);
-    println!("Episodes: {}", config.training.episodes);
-    println!("Max steps: {}", config.training.max_steps);
-    println!("Batch size: {}", config.training.batch_size);
-    println!("Learning rate: {}", config.training.learning_rate);
-    println!("Gamma: {}", config.training.gamma);
-    println!(
-        "Epsilon: [{}, {}], decay={}",
-        config.training.epsilon_start, config.training.epsilon_end, config.training.epsilon_decay
+    // Log configuration
+    tracing::info!("=== MINIMAL Training (Random Agent) ===");
+    tracing::info!("Episodes: {}", args.episodes);
+    tracing::info!("Max steps: {}", args.max_steps);
+    tracing::info!("Action dim: {}", action_dim);
+    tracing::info!(
+        "Tiers: {} ({:?})",
+        tiers.len(),
+        config.tiers.iter().map(|t| &t.name).collect::<Vec<_>>()
     );
-    println!("Replay buffer: {}", config.training.replay_buffer_size);
-    println!();
 
-    // Select backend and run training
-    match config.backend.backend_type {
-        eris::config::BackendType::Cpu => {
-            println!("Using CPU (NdArray) backend...");
-            let device = burn::backend::ndarray::NdArrayDevice::Cpu;
-            let mut agent =
-                create_agent::<Autodiff<NdArray>>(training_config, model_config, device);
-            run_training_loop(&mut env, &mut agent, args, &tier_selector, output_path)?;
+    // Training loop with RANDOM agent
+    let mut episode_rewards = Vec::new();
+    let mut epsilon: f32 = 1.0; // Start with random exploration
+    let epsilon_decay = 0.995_f32;
+    let epsilon_end = 0.01_f32;
+
+    tracing::info!(
+        "\n{:>10} {:>12} {:>10} {:>10}",
+        "Episode",
+        "Reward",
+        "Avg",
+        "Epsilon"
+    );
+
+    for episode in 0..args.episodes {
+        let mut total_reward = 0.0;
+        let mut done = false;
+        let mut state = env.reset();
+        let mut steps = 0;
+
+        // Episode loop
+        while !done && steps < args.max_steps {
+            // Random action selection
+            let action: usize = rng().random_range(0..action_dim);
+
+            // Step environment - returns (observation, reward, done)
+            let (next_obs, reward, is_done) = env.step(action);
+            total_reward += reward;
+            steps += 1;
+
+            state = next_obs;
+            done = is_done;
         }
-        eris::config::BackendType::Gpu => {
-            println!("Using GPU (Wgpu) backend...");
-            let device = burn::backend::wgpu::WgpuDevice::default();
-            let mut agent = create_agent::<Autodiff<Wgpu>>(training_config, model_config, device);
-            run_training_loop(&mut env, &mut agent, args, &tier_selector, output_path)?;
+
+        episode_rewards.push(total_reward as f32);
+
+        // Compute running average
+        let avg_reward: f32 = episode_rewards.iter().sum::<f32>() / episode_rewards.len() as f32;
+
+        // Log progress
+        tracing::info!(
+            "{:>10} {:>12.1} {:>10.1} {:>10.3}",
+            episode + 1,
+            total_reward,
+            avg_reward,
+            epsilon
+        );
+
+        // Show tier utilization every 5 episodes
+        if (episode + 1) % 5 == 0 {
+            let tier_util = env.get_tier_utilization();
+            tracing::info!("--- Tier Utilization (Episode {}) ---", episode + 1);
+            for (tier, &utilization) in tiers.iter().zip(tier_util.iter()) {
+                let bar_width = 40;
+                let filled = (utilization * bar_width as f32) as usize;
+                let empty = bar_width - filled;
+                let bar: String = "█".repeat(filled) + &"░".repeat(empty);
+                tracing::info!(
+                    "{}: |{}| {:.1}%",
+                    tier.config.name,
+                    bar,
+                    utilization * 100.0
+                );
+            }
+            tracing::info!("");
         }
-        eris::config::BackendType::Torch => {
-            #[cfg(feature = "torch")]
-            {
-                println!("Using LibTorch backend...");
-                use burn::backend::libtorch::LibTorchDevice;
-                use burn::backend::LibTorch;
-                let device = LibTorchDevice::Cpu;
-                let mut agent =
-                    create_agent::<Autodiff<LibTorch>>(training_config, model_config, device);
-                run_training_loop(&mut env, &mut agent, args, &tier_selector, output_path)?;
-            }
-            #[cfg(not(feature = "torch"))]
-            {
-                eprintln!("ERROR: Torch backend not enabled. Recompile with --features torch");
-                std::process::exit(1);
-            }
-        }
-        eris::config::BackendType::Cuda => {
-            #[cfg(feature = "cuda")]
-            {
-                println!("Using CUDA backend...");
-                use burn::backend::Cuda;
-                let device = Cuda::device(config.backend.device_id);
-                let mut agent =
-                    create_agent::<Autodiff<Cuda>>(training_config, model_config, device);
-                run_training_loop(&mut env, &mut agent, args, &tier_selector, output_path)?;
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                eprintln!("ERROR: CUDA backend not enabled. Recompile with --features cuda");
-                std::process::exit(1);
-            }
-        }
-        eris::config::BackendType::Rocm => {
-            #[cfg(feature = "rocm")]
-            {
-                println!("Using ROCm backend...");
-                use burn::backend::Rocm;
-                let device = Rocm::device(config.backend.device_id);
-                let mut agent =
-                    create_agent::<Autodiff<Rocm>>(training_config, model_config, device);
-                run_training_loop(&mut env, &mut agent, args, &tier_selector, output_path)?;
-            }
-            #[cfg(not(feature = "rocm"))]
-            {
-                eprintln!("ERROR: ROCm backend not enabled. Recompile with --features rocm");
-                std::process::exit(1);
-            }
-        }
+
+        // Decay epsilon
+        epsilon = (epsilon * epsilon_decay).max(epsilon_end);
     }
 
-    Ok(())
-}
+    // Final tier utilization
+    let tier_util = env.get_tier_utilization();
+    tracing::info!("\n=== Final Tier Utilization ===");
+    for (tier, &utilization) in tiers.iter().zip(tier_util.iter()) {
+        let bar_width = 40;
+        let filled = (utilization * bar_width as f32) as usize;
+        let empty = bar_width - filled;
+        let bar: String = "█".repeat(filled) + &"░".repeat(empty);
+        tracing::info!(
+            "{}: |{}| {:.1}%",
+            tier.config.name,
+            bar,
+            utilization * 100.0
+        );
+    }
 
-fn run_training_loop<B: AutodiffBackend>(
-    env: &mut IOBufferEnv,
-    agent: &mut CombinedAgent<B>,
-    args: &Args,
-    tier_selector: &eris::tier::TierSelector,
-    output_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Load full config for episode count
-    let config_path = Path::new(&args.config);
-    let config = FullTrainingConfig::from_file(config_path)?;
-    let episodes = args.episodes.unwrap_or(config.training.episodes);
-
-    let result = train_agent_with_metrics(env, agent, episodes, tier_selector);
-
-    tracing::info!("Training complete!");
+    // Summary
+    tracing::info!("\n=== Training Summary ===");
+    tracing::info!("Total episodes: {}", args.episodes);
     tracing::info!(
         "Average reward: {:.2}",
-        result.episode_rewards.iter().sum::<f32>() / result.episode_rewards.len() as f32
+        episode_rewards.iter().sum::<f32>() / episode_rewards.len() as f32
     );
-
-    // Save model
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    agent.save(output_path);
-
-    tracing::info!("Model saved to {:?}", output_path);
+    tracing::info!("Final epsilon: {:.3}", epsilon);
 
     Ok(())
 }
 
 fn main() {
-    let args = Args::parse();
+    // Minimal stack - just basic function calls, no deep generics
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024) // 8 MB is plenty for this
+        .spawn(|| {
+            let args = Args::parse();
 
-    // Initialize logging
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
+            // Initialize logging
+            let subscriber = FmtSubscriber::builder()
+                .with_max_level(Level::INFO)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("Failed to set tracing subscriber");
 
-    if let Err(e) = run_training(&args) {
-        tracing::error!("Training failed: {}", e);
-        std::process::exit(1);
-    }
+            if let Err(e) = run_training(&args) {
+                tracing::error!("Training failed: {}", e);
+                std::process::exit(1);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

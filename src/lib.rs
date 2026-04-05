@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Eris Reinforcement Learning Library - Multi-tier Storage Optimization
 //!
 //! This crate provides a reinforcement learning environment for optimizing
@@ -101,6 +103,7 @@
 // Public modules
 pub mod config;
 pub mod config_old;
+pub mod device;
 pub mod env;
 pub mod error;
 pub mod features;
@@ -149,7 +152,8 @@ pub use training::{
 };
 
 // RL integration
-pub use rl::{Action, ActionDistribution, DQNPolicy, DQNPolicyState, Observation};
+// Note: burn_rl dependent files removed - Action, ActionDistribution, DQNPolicy, DQNPolicyState, Observation
+// will be re-implemented when needed
 
 #[cfg(test)]
 mod tests {

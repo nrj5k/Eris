@@ -113,7 +113,7 @@ pub fn train_agent<B: AutodiffBackend, E: Environment<Observation = Vec<f64>, Ac
     let mut episode_rewards = Vec::with_capacity(num_episodes);
     let mut losses = Vec::new();
 
-    for episode in 0..num_episodes {
+    for _episode in 0..num_episodes {
         let mut total_reward = 0.0;
         let mut done = false;
         let mut state = env.reset();
@@ -364,12 +364,15 @@ pub fn train_agent_with_metrics<
         agent.config.epsilon_decay,
     );
 
-    println!("Training {} episodes...", num_episodes);
-    println!(
+    tracing::info!("Training {} episodes...", num_episodes);
+    tracing::info!(
         "{:>10} {:>12} {:>10} {:>10} {:>10}",
-        "Episode", "Reward", "Avg", "Epsilon", "Loss"
+        "Episode",
+        "Reward",
+        "Avg",
+        "Epsilon",
+        "Loss"
     );
-    println!("{}", "-".repeat(54));
 
     // Main training loop
     for episode in 0..num_episodes {
@@ -435,8 +438,8 @@ pub fn train_agent_with_metrics<
             0.0
         };
 
-        // Print progress
-        println!(
+        // Log progress
+        tracing::info!(
             "{:>10} {:>12.1} {:>10.1} {:>10.3} {:>10.4}",
             episode + 1,
             total_reward,
@@ -445,16 +448,41 @@ pub fn train_agent_with_metrics<
             avg_loss
         );
 
+        // Show tier utilization every 10 episodes using Burn's TierMetric
+        if (episode + 1) % 10 == 0 {
+            use burn::data::dataloader::Progress;
+            use burn::train::metric::{Metric, MetricMetadata};
+
+            let tier_util = env.get_tier_utilization();
+            let mut tier_metric = crate::training::TierMetric::new();
+            let tier_names: Vec<String> = (0..tier_util.len())
+                .map(|i| format!("Tier_{}", i))
+                .collect();
+            let tier_input = crate::training::TierInput {
+                tier_names,
+                tier_utilizations: tier_util.clone(),
+            };
+            let metadata = MetricMetadata {
+                progress: Progress::new(episode + 1, num_episodes),
+                epoch: episode + 1,
+                epoch_total: num_episodes,
+                iteration: episode + 1,
+                lr: None,
+            };
+            let entry = tier_metric.update(&tier_input, &metadata);
+            tracing::info!("--- Tier Utilization (Episode {}) ---", episode + 1);
+            tracing::info!("{}", entry.formatted);
+        }
+
         // Decay epsilon after episode
         epsilon_callback.decay();
     }
 
-    println!("{}", "-".repeat(54));
-    println!(
+    tracing::info!(
         "Training complete! Final epsilon: {:.3}",
         epsilon_callback.epsilon()
     );
-    println!(
+    tracing::info!(
         "Average reward: {:.2}",
         episode_rewards.iter().sum::<f32>() / episode_rewards.len() as f32
     );

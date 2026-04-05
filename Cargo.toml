@@ -5,17 +5,21 @@ edition = "2024"
 
 [features]
 default = ["cpu"]
-cpu = []
-gpu = []
-torch = ["burn/tch"]
-cuda = ["burn/cuda"]
-rocm = ["burn/rocm"]
-vulkan = ["burn/vulkan"]
+cpu = ["burn/ndarray"]
+gpu = ["burn/wgpu"]
+nvidia = ["burn/cuda"]
+amd = ["burn/rocm"]
 
 [dependencies]
 postcard = { version = "1.1", features = ["alloc", "use-crc"] }
-burn = { version = "0.21.0-pre.2", features = ["wgpu", "autodiff", "train", "ndarray"] }
-burn-rl = "0.21.0-pre.2"
+burn = { version = "0.20", features = [
+  "wgpu",
+  "autodiff",
+  "train",
+  "ndarray",
+  "tui",
+], default-features = false }
+# burn-rl = "0.21.0-pre.2"
 chrono = "0.4.44"
 clap = { version = "4", features = ["derive"] }
 csv = "1.4.0"
@@ -27,6 +31,7 @@ memmap2 = "0.9.10"
 rand = "0.10.0"
 rand_pcg = "0.10.0"
 rand_distr = "0.6.0"
+rayon = "1.11"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0.18"

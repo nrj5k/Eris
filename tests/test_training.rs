@@ -12,8 +12,8 @@
 
 use burn::backend::{Autodiff, NdArray};
 use eris::training::{
-    create_dummy_transition, fill_buffer, CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer,
-    TrainingConfig, Transition,
+    CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer, TrainingConfig, Transition,
+    create_dummy_transition, fill_buffer,
 };
 
 #[test]

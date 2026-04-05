@@ -1,10 +1,3 @@
-//! Reinforcement Learning integration with burn-rl
+//! Reinforcement Learning module
 //!
-//! This module provides Policy implementations for our models
-//! using the burn-rl crate's traits.
-
-mod policy;
-mod types;
-
-pub use policy::*;
-pub use types::*;
+//! This module provides RL-related utilities and types.

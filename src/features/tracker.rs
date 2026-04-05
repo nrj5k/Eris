@@ -18,26 +18,26 @@ pub struct AccessRecord {
 #[derive(Debug, Clone)]
 pub struct AccessTracker {
     /// In-memory sliding window of access records
-    memory_window: VecDeque<AccessRecord>,
+    memory_window: Box<VecDeque<AccessRecord>>,
     /// Maximum size of the sliding window
     max_memory_size: usize,
     /// Global access sequence for reuse distance calculation
-    access_sequence: Vec<String>,
+    access_sequence: Box<Vec<String>>,
     /// Index for O(1) lookup of last access time per blob
-    last_access_time: HashMap<String, u64>,
+    last_access_time: Box<HashMap<String, u64>>,
     /// Access count per blob
-    access_counts: HashMap<String, u32>,
+    access_counts: Box<HashMap<String, u32>>,
 }
 
 impl AccessTracker {
     /// Create a new tracker with specified window size
     pub fn new(window_size: usize) -> Self {
         Self {
-            memory_window: VecDeque::with_capacity(window_size),
+            memory_window: Box::new(VecDeque::with_capacity(window_size)),
             max_memory_size: window_size,
-            access_sequence: Vec::new(),
-            last_access_time: HashMap::new(),
-            access_counts: HashMap::new(),
+            access_sequence: Box::new(Vec::new()),
+            last_access_time: Box::new(HashMap::new()),
+            access_counts: Box::new(HashMap::new()),
         }
     }
 

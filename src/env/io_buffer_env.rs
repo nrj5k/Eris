@@ -3,7 +3,7 @@ use crate::env::{Environment, Info, StepResult};
 use crate::error::{EnvError, Result};
 use crate::features::{AccessRecord, AccessTracker, BlobFeatures, HotnessConfig};
 use crate::models::decode_action;
-use crate::space::{BoxSpace, DiscreteSpace};
+use crate::space::{BoxSpace, DiscreteSpace, Space};
 use crate::tier::BufferEnv;
 use crate::trace::{BlobData, TraceReader};
 
@@ -78,7 +78,7 @@ impl IOBufferEnv {
             buffer,
             trace,
             current_step: 0,
-            tracker: AccessTracker::new(10_000),
+            tracker: AccessTracker::new(1000), // Reduced from 10_000 to avoid stack overflow
             current_time_ms: 0,
             current_blob: None,
             hotness_config: HotnessConfig::default(),
@@ -86,6 +86,21 @@ impl IOBufferEnv {
             max_blob_size,
             max_frequency,
         })
+    }
+
+    /// Get max steps per episode
+    pub fn get_max_steps(&self) -> usize {
+        self.max_steps
+    }
+
+    /// Get observation dimension
+    pub fn observation_dim(&self) -> usize {
+        self.tier_configs.len() + 10 // tier sizes + blob features
+    }
+
+    /// Get action dimension
+    pub fn action_dim(&self) -> usize {
+        self.action_space().n
     }
 
     /// Process the current blob with the given action.
@@ -294,12 +309,6 @@ impl IOBufferEnv {
         }
     }
 
-    /// Compute observation dimension dynamically
-    pub fn observation_dim(&self) -> usize {
-        // Number of tiers + 10 blob features
-        self.tier_configs.len() + 10
-    }
-
     /// Get tier utilization states [0.0, 1.0] for all tiers
     pub fn get_tier_utilization(&self) -> Vec<f32> {
         self.buffer.get_state()
@@ -388,7 +397,8 @@ impl Environment for IOBufferEnv {
     fn observation_space(&self) -> BoxSpace {
         // Observation is normalized tier sizes + normalized blob features
         // All values in [0, 1]
-        BoxSpace::uniform(self.observation_dim(), 0.0, 1.0)
+        let dim = self.tier_configs.len() + 10; // tier sizes + blob features
+        BoxSpace::uniform(dim, 0.0, 1.0)
     }
 
     fn action_space(&self) -> DiscreteSpace {

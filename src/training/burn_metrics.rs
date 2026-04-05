@@ -7,6 +7,16 @@ use burn::tensor::backend::Backend;
 use burn::train::metric::{Metric, MetricMetadata, Numeric, NumericEntry, SerializedEntry};
 use std::sync::Arc;
 
+/// Tier utilization visualization metric with progress bars.
+///
+/// Displays tier utilization as visual bars:
+/// ```
+/// Tiers:
+/// Memory [████████░░] 80%
+/// NVMe   [██████████] 100%
+/// SSD    [░░░░░░░░░░] 0%
+/// ```
+
 /// Input type for RewardMetric.
 ///
 /// Contains the total reward for an episode.
@@ -371,6 +381,129 @@ impl<B: Backend> Numeric for MeanQMetric<B> {
     }
 }
 
+/// Input type for TierMetric.
+///
+/// Contains tier names and their utilization ratios.
+#[derive(Debug, Clone)]
+pub struct TierInput {
+    /// Tier names (e.g., ["Memory", "NVMe", "SSD"])
+    pub tier_names: Vec<String>,
+    /// Utilization ratio for each tier (0.0 to 1.0)
+    pub tier_utilizations: Vec<f32>,
+}
+
+/// Metric for tracking tier utilization with visual bars.
+///
+/// Shows progress bars for each tier's utilization:
+/// ```
+/// Tiers:
+/// Memory [████████░░] 80%
+/// NVMe   [██████████] 100%
+/// SSD    [░░░░░░░░░░] 0%
+/// ```
+///
+/// This metric provides visual feedback on storage tier efficiency.
+#[derive(Debug, Clone)]
+pub struct TierMetric {
+    /// Tier names
+    tier_names: Vec<String>,
+    /// Average utilization per tier
+    tier_averages: Vec<f32>,
+    /// Number of updates
+    count: usize,
+}
+
+impl Default for TierMetric {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TierMetric {
+    /// Create a new tier metric.
+    pub fn new() -> Self {
+        Self {
+            tier_names: Vec::new(),
+            tier_averages: Vec::new(),
+            count: 0,
+        }
+    }
+
+    /// Create progress bar visualization
+    fn create_bar(utilization: f32, width: usize) -> String {
+        let filled = ((utilization * width as f32).ceil() as usize).min(width);
+        let empty = width - filled;
+        format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+    }
+}
+
+impl Metric for TierMetric {
+    type Input = TierInput;
+
+    fn name(&self) -> Arc<String> {
+        Arc::new("TierUtilization".to_string())
+    }
+
+    fn update(&mut self, input: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
+        // Initialize tier names on first update
+        if self.tier_names.is_empty() && !input.tier_names.is_empty() {
+            self.tier_names = input.tier_names.clone();
+            self.tier_averages = vec![0.0; input.tier_names.len()];
+        }
+
+        // Update running averages
+        if !input.tier_utilizations.is_empty() {
+            if self.tier_averages.len() != input.tier_utilizations.len() {
+                self.tier_averages = vec![0.0; input.tier_utilizations.len()];
+            }
+
+            for (i, &util) in input.tier_utilizations.iter().enumerate() {
+                self.tier_averages[i] =
+                    (self.tier_averages[i] * self.count as f32 + util) / (self.count + 1) as f32;
+            }
+            self.count += 1;
+        }
+
+        // Create formatted output with bars
+        let mut formatted = String::from("Tiers:\n");
+        for (i, (name, &avg)) in self
+            .tier_names
+            .iter()
+            .zip(self.tier_averages.iter())
+            .enumerate()
+        {
+            let utilization = if i < self.tier_averages.len() {
+                self.tier_averages[i]
+            } else {
+                0.0
+            };
+            let bar = Self::create_bar(utilization, 10);
+            formatted.push_str(&format!("{} {} {:.0}%\n", name, bar, utilization * 100.0));
+        }
+
+        SerializedEntry::new(formatted.clone(), formatted)
+    }
+
+    fn clear(&mut self) {
+        self.tier_averages = vec![0.0; self.tier_names.len()];
+        self.count = 0;
+    }
+}
+
+impl Numeric for TierMetric {
+    fn value(&self) -> NumericEntry {
+        if self.tier_averages.is_empty() {
+            return NumericEntry::Value(0.0);
+        }
+        let avg: f32 = self.tier_averages.iter().sum::<f32>() / self.tier_averages.len() as f32;
+        NumericEntry::Value(avg as f64)
+    }
+
+    fn running_value(&self) -> NumericEntry {
+        self.value()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,11 +511,12 @@ mod tests {
 
     /// Helper to create a minimal metadata for tests
     fn dummy_metadata() -> MetricMetadata {
-        // Burn 0.21 requires all fields
+        // Burn 0.20 requires all fields
         MetricMetadata {
             progress: Progress::new(0, 0),
-            global_progress: Progress::new(0, 0),
-            iteration: Some(0),
+            epoch: 0,
+            epoch_total: 1,
+            iteration: 0,
             lr: None,
         }
     }

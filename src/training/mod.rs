@@ -1,7 +1,6 @@
 pub mod burn_callbacks;
 pub mod burn_dataloader;
 pub mod burn_metrics;
-pub mod burn_policy;
 pub mod burn_trainer;
 pub mod checkpoint;
 pub mod coordinator;
@@ -12,10 +11,9 @@ pub mod trainer;
 pub use burn_callbacks::{EpsilonDecayCallback, RewardTrackingCallback, TargetUpdateCallback};
 pub use burn_dataloader::{DQNBatch, DQNDataLoader};
 pub use burn_metrics::{
-    EpsilonInput, EpsilonMetric, MeanQInput, MeanQMetric, RewardInput, RewardMetric,
-    TierUtilizationInput, TierUtilizationMetric,
+    EpsilonInput, EpsilonMetric, MeanQInput, MeanQMetric, RewardInput, RewardMetric, TierInput,
+    TierMetric, TierUtilizationInput, TierUtilizationMetric,
 };
-pub use burn_policy::{CombinedPolicyState, DQNConfig, DQNLearner, DQNPolicy, StateTensor};
 pub use burn_trainer::DQNTrainingOutput;
 pub use checkpoint::CheckpointMetadata;
 pub use coordinator::{train_agent, train_agent_burn, train_agent_with_metrics, TrainingResult};
