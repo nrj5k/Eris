@@ -2,6 +2,29 @@ use crate::config_old::TierConfig;
 use crate::features::tracker::AccessTracker;
 use crate::trace::BlobData;
 
+/// GPU warp size for optimal memory coalescing and utilization
+pub const WARP_SIZE: usize = 32;
+
+/// Pad feature vector to warp-aligned size for optimal GPU performance
+///
+/// Current: 15 dimensions (5 tiers + 10 features)
+/// Target: 32 dimensions (padded with zeros)
+///
+/// GPU warp size is 32, so dimensions should be multiples of 32
+/// for optimal memory coalescing and utilization.
+pub fn pad_to_warp_size(features: &[f32]) -> Vec<f32> {
+    let mut padded = features.to_vec();
+    if padded.len() < WARP_SIZE {
+        padded.resize(WARP_SIZE, 0.0);
+    }
+    padded
+}
+
+/// Get the warp-aligned state dimension
+pub const fn aligned_state_dim() -> usize {
+    WARP_SIZE
+}
+
 /// 10-dimensional feature vector for a blob
 #[derive(Debug, Clone)]
 pub struct BlobFeatures {
@@ -122,23 +145,35 @@ impl BlobFeatures {
     }
 
     /// Convert features to vector for model input
+    ///
+    /// Returns a warp-aligned vector of 32 dimensions:
+    /// - First 10 elements: actual features
+    /// - Remaining 22 elements: zero padding for GPU optimization
     pub fn to_vec(&self) -> Vec<f32> {
-        vec![
-            self.recency,
-            self.frequency,
-            self.mean_interval,
-            self.std_interval,
-            self.is_sequential,
-            self.reuse_distance,
-            self.last_access_type,
-            self.size,
-            self.next_access_pred,
-            self.overwrite_amount,
-        ]
+        let mut features = Vec::with_capacity(WARP_SIZE);
+
+        // Original 10 features
+        features.push(self.recency);
+        features.push(self.frequency);
+        features.push(self.mean_interval);
+        features.push(self.std_interval);
+        features.push(self.is_sequential);
+        features.push(self.reuse_distance);
+        features.push(self.last_access_type);
+        features.push(self.size);
+        features.push(self.next_access_pred);
+        features.push(self.overwrite_amount);
+
+        // Pad with zeros to reach warp size (32)
+        while features.len() < WARP_SIZE {
+            features.push(0.0);
+        }
+
+        features
     }
 }
 
-/// Encode state: [tier_sizes(5), features(10)] = 15-dimensional vector
+/// Encode state: [tier_sizes(5), features(10)] = 15-dimensional vector, padded to 32 for GPU optimization
 ///
 /// # Arguments
 /// * `tier_sizes` - Current sizes of each tier (from BufferEnv::tier_sizes())
@@ -146,26 +181,32 @@ impl BlobFeatures {
 /// * `tier_configs` - Tier configuration for capacity normalization
 ///
 /// # Returns
-/// 15-dimensional state vector for RL agent
+/// 32-dimensional state vector for RL agent (padded to warp size for GPU optimization)
 pub fn encode_state(
     tier_sizes: &[f64],
     features: &BlobFeatures,
     tier_configs: &[TierConfig],
 ) -> Vec<f32> {
-    let mut state = Vec::with_capacity(15);
+    let mut state = Vec::with_capacity(WARP_SIZE);
 
-    // Tier sizes (5-dim, normalized to capacity, clamped to [0, 1])
-    for (size, config) in tier_sizes.iter().zip(tier_configs.iter()) {
-        let normalized = if config.capacity > 0.0 {
-            ((size / config.capacity) as f32).min(1.0)
-        } else {
-            0.0
-        };
-        state.push(normalized);
+    // Add tier utilizations (up to 5, pad rest)
+    // Use tier_sizes for current size, tier_configs for capacity
+    for (i, tier) in tier_configs.iter().take(5).enumerate() {
+        let current_size = tier_sizes.get(i).copied().unwrap_or(0.0);
+        let utilization = (current_size / tier.capacity as f64).min(1.0); // Clamp to [0, 1]
+        state.push(utilization as f32);
+    }
+    // Pad remaining tier slots
+    while state.len() < 5 {
+        state.push(0.0);
     }
 
-    // Blob features (10-dim)
-    state.extend(features.to_vec());
+    // Add features (already padded to 32 by to_vec())
+    let feature_vec = features.to_vec(); // Now returns 32 elements
+    state.extend(&feature_vec[0..10]); // Only take first 10 actual features
+
+    // Ensure total is 32 (warp size)
+    state.resize(WARP_SIZE, 0.0);
 
     state
 }
@@ -212,7 +253,7 @@ mod tests {
         approx::assert_relative_eq!(features.overwrite_amount, 0.5, epsilon = 1e-5);
 
         let vec = features.to_vec();
-        assert_eq!(vec.len(), 10);
+        assert_eq!(vec.len(), 32, "Features must be padded to warp size 32");
     }
 
     #[test]
@@ -373,7 +414,7 @@ mod tests {
 
         let state = encode_state(&tier_sizes, &features, &tier_configs);
 
-        assert_eq!(state.len(), 15); // 5 tier sizes + 10 features
+        assert_eq!(state.len(), 32, "State must be padded to warp size 32"); // 5 tier sizes + 10 features + 17 padding
 
         // Check tier normalization
         approx::assert_relative_eq!(state[0], 0.5, epsilon = 1e-5); // 400/800
@@ -381,9 +422,14 @@ mod tests {
         approx::assert_relative_eq!(state[2], 0.5, epsilon = 1e-5); // 2000/4000
         approx::assert_relative_eq!(state[3], 0.5, epsilon = 1e-5); // 10000/20000
 
-        // Check features are copied correctly
+        // Check features are copied correctly (indices 5-14 are the 10 features)
         approx::assert_relative_eq!(state[5], 0.1, epsilon = 1e-5); // recency
         approx::assert_relative_eq!(state[6], 0.5, epsilon = 1e-5); // frequency
+
+        // Check padding (indices 15-31 should be zeros)
+        for i in 15..32 {
+            approx::assert_relative_eq!(state[i], 0.0, epsilon = 1e-5);
+        }
     }
 
     #[test]
@@ -525,7 +571,7 @@ mod tests {
         let state = encode_state(&tier_sizes, &features, &tier_configs);
 
         // First tier size should be clamped to 1.0 (1600/800 = 2.0, clamped to 1.0)
-        assert_eq!(state.len(), 15);
+        assert_eq!(state.len(), 32, "State must be padded to warp size 32");
         approx::assert_relative_eq!(state[0], 1.0, epsilon = 1e-5); // Clamped
         approx::assert_relative_eq!(state[1], 0.5, epsilon = 1e-5);
     }

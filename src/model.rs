@@ -56,6 +56,7 @@
 
 use crate::error::Result;
 use burn::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Activation function variants for neural networks
@@ -75,7 +76,7 @@ use std::path::Path;
 /// let sigmoid = Activation::Sigmoid;
 /// let leaky_relu = Activation::LeakyReLU(0.01);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Activation {
     ReLU,
     Sigmoid,

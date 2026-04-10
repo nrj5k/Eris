@@ -3,10 +3,10 @@ use std::collections::VecDeque;
 /// Transition for experience replay
 #[derive(Debug, Clone)]
 pub struct Transition {
-    pub state: Vec<f32>, // [15] - 5 tier sizes + 10 features
+    pub state: Vec<f32>, // [32] - warp-aligned (5 tier sizes + 10 features + 17 padding)
     pub action: usize,   // 0-9
     pub reward: f32,
-    pub next_state: Vec<f32>, // [15]
+    pub next_state: Vec<f32>, // [32]
     pub done: bool,
 }
 

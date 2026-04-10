@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_dqn_builder_defaults() {
-        let action_dim = 15;
+        let action_dim = 32;
         let config = DQNConfig::builder()
             .input_dim(20)
             .hidden_layers(vec![128])

@@ -155,9 +155,9 @@ impl<B: Backend> CombinedModel<B> {
             let argmax_idx = tier_q_values.argmax(1);
 
             // Convert to scalar
-            let op_idx_vec: Vec<i64> = argmax_idx
+            let op_idx_vec: Vec<i32> = argmax_idx
                 .into_data()
-                .convert::<i64>()
+                .convert::<i32>()
                 .to_vec()
                 .expect("Failed to convert argmax to vec");
             let op_idx = op_idx_vec[0];

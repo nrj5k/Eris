@@ -1,12 +1,12 @@
 use burn::backend::NdArray;
 use burn::tensor::Tensor;
 
-use eris::config::TierConfig;
 use eris::models::{
-    CombinedModel, CombinedModelConfig, ContextualBandit, ContextualBanditConfig, QNetwork,
-    QNetworkConfig, decode_action, encode_action,
+    decode_action, encode_action, CombinedModel, CombinedModelConfig, ContextualBandit,
+    ContextualBanditConfig, QNetwork, QNetworkConfig,
 };
 use eris::tier::Tier;
+use eris::TierConfig; // Old TierConfig from config_old
 
 type Backend = NdArray;
 

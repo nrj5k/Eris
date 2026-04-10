@@ -109,6 +109,8 @@ pub mod error;
 pub mod features;
 pub mod model;
 pub mod models;
+pub mod policies;
+pub mod profiling;
 pub mod rl;
 pub mod space;
 pub mod tier;
@@ -119,6 +121,9 @@ pub mod training;
 // Config
 pub use config::{BanditConfig, CombinedBanditDQNConfig, DQNConfig};
 pub use config_old::{Config, TierConfig};
+
+// Device
+pub use device::{available_backends, Device};
 
 // Error handling
 pub use error::{EnvError, Result};

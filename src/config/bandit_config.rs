@@ -5,6 +5,7 @@
 
 use crate::error::Result;
 use crate::model::Activation;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Configuration for contextual bandit network with enhanced features
@@ -38,10 +39,10 @@ use std::fmt;
 ///     .activation(Activation::Sigmoid)  // For importance score
 ///     .build()?;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BanditConfig {
     /// Input dimension (state dimension)
-    /// For storage tier optimization: 5 tier sizes + 10 blob features = 15
+    /// For storage tier optimization: 5 tier sizes + 10 blob features = 15, padded to 32 for GPU optimization
     pub input_dim: usize,
 
     /// Hidden layer dimensions
@@ -126,7 +127,9 @@ impl BanditConfigBuilder {
     /// For storage tier optimization:
     /// - 5 tier sizes (normalized capacities)
     /// - 10 blob features (size, access count, recency, etc.)
-    /// - Total: 15 dimensions
+    /// - Total: 15 dimensions, padded to 32 for GPU warp alignment
+    ///
+    /// Recommended: Use 32 (warp size) for optimal GPU performance
     pub fn input_dim(mut self, dim: usize) -> Self {
         self.input_dim = Some(dim);
         self

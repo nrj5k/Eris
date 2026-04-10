@@ -3,12 +3,27 @@ use crate::env::{Environment, Info, StepResult};
 use crate::error::{EnvError, Result};
 use crate::features::{AccessRecord, AccessTracker, BlobFeatures, HotnessConfig};
 use crate::models::decode_action;
-use crate::space::{BoxSpace, DiscreteSpace, Space};
+use crate::space::{BoxSpace, DiscreteSpace};
 use crate::tier::BufferEnv;
-use crate::trace::{BlobData, TraceReader};
+use crate::trace::{BlobData, TraceData, TraceReader};
+use std::sync::Arc;
 
 /// Maximum number of tiers in the hierarchy
 pub const MAX_TIERS: usize = 5;
+
+/// Worst case latency (tape) for normalization
+const WORST_LATENCY: f64 = 1_000_000.0; // 1,000,000 ms
+const BEST_LATENCY: f64 = 0.01; // 0.01 ms
+const MISS_PENALTY: f64 = -0.5; // Penalty for cache miss
+
+/// Calculate normalized reward based on relative savings.
+///
+/// Range: 0.0 (tape/worst) to 1.0 (memory/best)
+/// Formula: (worst_latency - actual_latency) / worst_latency
+fn calculate_latency_reward(latency: f64) -> f64 {
+    let savings = (WORST_LATENCY - latency) / WORST_LATENCY;
+    savings.max(0.0).min(1.0) // Clamp to [0, 1]
+}
 
 /// I/O Buffer Environment for reinforcement learning.
 ///
@@ -24,7 +39,7 @@ pub struct IOBufferEnv {
     max_steps: usize,
     /// Multi-tier storage buffer
     buffer: BufferEnv,
-    /// Trace reader for blob data
+    /// Trace reader for blob data (shares loaded data via Arc<TraceData>, but has independent position tracking)
     trace: TraceReader,
     /// Current step count
     current_step: usize,
@@ -65,6 +80,15 @@ impl IOBufferEnv {
         let config = Config::from_file(config_path)?;
         let trace = TraceReader::from_csv(trace_path)?;
 
+        // Report loading statistics
+        println!(
+            "✓ Environment initialized with {} trace records",
+            trace.total_records()
+        );
+        if trace.skipped_records() > 0 {
+            println!("  ({} malformed rows skipped)", trace.skipped_records());
+        }
+
         let tier_configs = config.tier.clone();
         let buffer = BufferEnv::new(config.tier);
 
@@ -88,14 +112,62 @@ impl IOBufferEnv {
         })
     }
 
+    /// Create environment with shared trace data (for VecEnv).
+    ///
+    /// This constructor accepts shared `Arc<TraceData>` to avoid loading
+    /// the CSV file multiple times when creating multiple environments.
+    /// Each environment has independent position tracking.
+    ///
+    /// # Arguments
+    /// * `config_path` - Path to tier configuration TOML file
+    /// * `trace_data` - Shared trace data (loaded once, shared across envs)
+    /// * `max_steps` - Maximum steps per episode
+    ///
+    /// # Errors
+    /// Returns error if config file cannot be loaded.
+    pub fn with_shared_trace(
+        config_path: &std::path::Path,
+        trace_data: Arc<TraceData>,
+        max_steps: usize,
+    ) -> Result<Self> {
+        use crate::config::Config;
+        use rand::SeedableRng;
+
+        let config = Config::from_file(config_path)?;
+        let tier_configs = config.tier.clone();
+        let buffer = BufferEnv::new(config.tier);
+
+        // Create a new TraceReader with shared data but independent position tracking
+        let trace = TraceReader::from_shared_data(trace_data);
+
+        // Estimate max blob size from first few records (for normalization)
+        let max_blob_size = 2_000_000.0; // Default max 2MB
+        let max_frequency = 100; // Default max frequency
+
+        Ok(Self {
+            tier_configs,
+            max_steps,
+            buffer,
+            trace,
+            current_step: 0,
+            tracker: AccessTracker::new(1000),
+            current_time_ms: 0,
+            current_blob: None,
+            hotness_config: HotnessConfig::default(),
+            random: rand_pcg::Pcg64::seed_from_u64(42),
+            max_blob_size,
+            max_frequency,
+        })
+    }
+
     /// Get max steps per episode
     pub fn get_max_steps(&self) -> usize {
         self.max_steps
     }
 
-    /// Get observation dimension
+    /// Get observation dimension (warp-aligned for GPU optimization)
     pub fn observation_dim(&self) -> usize {
-        self.tier_configs.len() + 10 // tier sizes + blob features
+        32 // Warp-aligned dimension (5 tier sizes + 10 features + 17 padding)
     }
 
     /// Get action dimension
@@ -206,15 +278,15 @@ impl IOBufferEnv {
         for i in 0..self.buffer.num_tiers() {
             if let Some(tier) = self.buffer.get_tier_ref(i) {
                 if tier.contains(blob_id) {
-                    // Found, return negative latency as penalty
-                    let latency = tier.config.access_latency;
-                    return Ok(-(latency as f64));
+                    // Found, return normalized reward
+                    let latency = tier.config.access_latency as f64;
+                    return Ok(calculate_latency_reward(latency));
                 }
             }
         }
 
-        // Blob not found, return large penalty
-        Ok(-10000.0)
+        // Blob not found, return miss penalty
+        Ok(MISS_PENALTY)
     }
 
     /// Find eviction candidate with lowest hotness score in the tier.
@@ -397,7 +469,8 @@ impl Environment for IOBufferEnv {
     fn observation_space(&self) -> BoxSpace {
         // Observation is normalized tier sizes + normalized blob features
         // All values in [0, 1]
-        let dim = self.tier_configs.len() + 10; // tier sizes + blob features
+        // Phase 01: Warp-aligned to 32 for GPU optimization
+        let dim = 32; // tier_configs.len() + 10 padded to warp size
         BoxSpace::uniform(dim, 0.0, 1.0)
     }
 
@@ -568,5 +641,58 @@ mod tests {
         } else {
             eprintln!("Skipping test: config or trace files not found");
         }
+    }
+
+    #[test]
+    fn test_calculate_latency_reward() {
+        // Test reward function produces values in [0, 1] range
+
+        // Worst case (tape) - should be near 0
+        let tape_latency = 1_000_000.0;
+        let tape_reward = calculate_latency_reward(tape_latency);
+        assert!((0.0..=1.0).contains(&tape_reward));
+        assert!(
+            tape_reward < 0.01,
+            "Tape reward should be near 0: {}",
+            tape_reward
+        );
+
+        // Best case (memory) - should be near 1
+        let memory_latency = 0.01;
+        let memory_reward = calculate_latency_reward(memory_latency);
+        assert!((0.0..=1.0).contains(&memory_reward));
+        assert!(
+            memory_reward > 0.99,
+            "Memory reward should be near 1: {}",
+            memory_reward
+        );
+
+        // Middle tier (SSD) - should be in between
+        let ssd_latency = 100.0;
+        let ssd_reward = calculate_latency_reward(ssd_latency);
+        assert!((0.0..=1.0).contains(&ssd_reward));
+        assert!(ssd_reward > tape_reward && ssd_reward < memory_reward);
+
+        // Verify MISS_PENALTY is used for cache misses
+        assert!((-1.0..=0.0).contains(&MISS_PENALTY));
+    }
+
+    #[test]
+    fn test_reward_range() {
+        // Test that rewards are properly bounded
+        // Very high latency should clamp to 0
+        let high_latency = 2_000_000.0;
+        let high_reward = calculate_latency_reward(high_latency);
+        assert_eq!(high_reward, 0.0, "Very high latency should clamp to 0");
+
+        // Zero latency should give max reward
+        let zero_latency = 0.0;
+        let zero_reward = calculate_latency_reward(zero_latency);
+        assert_eq!(zero_reward, 1.0, "Zero latency should give max reward 1.0");
+
+        // Negative latency doesn't make sense, but should clamp to 1
+        let negative_latency = -10.0;
+        let negative_reward = calculate_latency_reward(negative_latency);
+        assert_eq!(negative_reward, 1.0, "Negative latency should clamp to 1.0");
     }
 }

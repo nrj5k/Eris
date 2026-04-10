@@ -1,7 +1,8 @@
 //! Test checkpoint saving for both policy and target models
 
 use burn::backend::{Autodiff, NdArray};
-use eris::models::CombinedModelConfig;
+use eris::config::CombinedBanditDQNConfig;
+use eris::model::ErisDefaults;
 use eris::training::{CombinedAgent, TrainingConfig};
 use tempfile::TempDir;
 
@@ -21,7 +22,9 @@ fn test_checkpoint_saves_both_models() {
     type Backend = Autodiff<NdArray>;
     let device = burn::backend::ndarray::NdArrayDevice::Cpu;
     let training_config = TrainingConfig::default();
-    let model_config = CombinedModelConfig::new(10, 20, 128, 3);
+
+    // Use ErisDefaults for model config
+    let model_config = ErisDefaults::storage_tier_model(10, 3);
 
     // Create agent
     let agent = CombinedAgent::<Backend>::new(training_config, model_config, device);

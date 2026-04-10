@@ -68,7 +68,7 @@ impl<B: Backend> DQNDataLoader<B> {
 
         let rewards: Vec<f32> = transitions.iter().map(|t| t.reward).collect();
 
-        let actions: Vec<i64> = transitions.iter().map(|t| t.action as i64).collect();
+        let actions: Vec<i32> = transitions.iter().map(|t| t.action as i32).collect();
 
         let dones: Vec<f32> = transitions
             .iter()
@@ -83,7 +83,7 @@ impl<B: Backend> DQNDataLoader<B> {
         // Actions: [batch_size] (int tensor)
         let actions_data = TensorData::new(actions, [self.batch_size]);
         let actions: Tensor<B, 1, Int> =
-            Tensor::from_data(actions_data.convert::<i64>(), &self.device);
+            Tensor::from_data(actions_data.convert::<i32>(), &self.device);
 
         // Rewards: [batch_size]
         let rewards_data = TensorData::new(rewards, [self.batch_size]);

@@ -1,6 +1,6 @@
 use crate::env::Environment;
 use crate::tier::TierSelector;
-use crate::training::{CombinedAgent, Transition};
+use crate::training::CombinedAgent;
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Tensor, TensorData};
 
@@ -138,21 +138,18 @@ pub fn train_agent<B: AutodiffBackend, E: Environment<Observation = Vec<f64>, Ac
             // Convert next_state f64 -> f32
             let next_state_f32: Vec<f32> = result.observation.iter().map(|&x| x as f32).collect();
 
-            // Store transition in replay buffer
-            agent.buffer.push(Transition {
-                state: state_f32,
+            // Store transition in hybrid buffer (CPU storage, GPU conversion on sample)
+            agent.buffer.push(
+                state_f32.clone(),
                 action,
-                reward: result.reward as f32,
-                next_state: next_state_f32,
-                done: result.done,
-            });
+                result.reward as f32,
+                next_state_f32.clone(),
+                result.done,
+            );
 
-            // Train if buffer has enough samples
-            // DEPRECATED: Manual train_step - will be replaced by Burn TrainStep
-            #[allow(deprecated)]
+            // Train if buffer has enough samples using GPU-native sampling
             if agent.buffer.len() >= agent.config.batch_size {
-                if let Some(batch) = agent.buffer.sample_batch(agent.config.batch_size) {
-                    let loss = agent.train_step(batch);
+                if let Some(loss) = agent.train_step_gpu_native(agent.config.batch_size) {
                     losses.push(loss);
                 }
             }
@@ -276,22 +273,19 @@ pub fn train_agent_burn<
             let result = env.step(action);
             total_reward += result.reward;
 
-            // Store transition
+            // Store transition in hybrid buffer (CPU storage, GPU conversion on sample)
             let next_state_f32: Vec<f32> = result.observation.iter().map(|&x| x as f32).collect();
-            agent.buffer.push(Transition {
-                state: state_f32,
+            agent.buffer.push(
+                state_f32.clone(),
                 action,
-                reward: result.reward as f32,
-                next_state: next_state_f32,
-                done: result.done,
-            });
+                result.reward as f32,
+                next_state_f32.clone(),
+                result.done,
+            );
 
-            // Train with Burn's TrainStep
-            // DEPRECATED: Manual train_step - will be replaced by Burn TrainStep
-            #[allow(deprecated)]
+            // Train with GPU-native sampling
             if agent.buffer.len() >= agent.config.batch_size {
-                if let Some(batch) = agent.buffer.sample_batch(agent.config.batch_size) {
-                    let loss = agent.train_step(batch);
+                if let Some(loss) = agent.train_step_gpu_native(agent.config.batch_size) {
                     losses.push(loss);
 
                     // Update target network if needed
@@ -398,21 +392,19 @@ pub fn train_agent_with_metrics<
             let result = env.step(action);
             total_reward += result.reward;
 
-            // Store transition
+            // Store transition in hybrid buffer (CPU storage, GPU conversion on sample)
             let next_state_f32: Vec<f32> = result.observation.iter().map(|&x| x as f32).collect();
-            agent.buffer.push(Transition {
-                state: state_f32,
+            agent.buffer.push(
+                state_f32.clone(),
                 action,
-                reward: result.reward as f32,
-                next_state: next_state_f32,
-                done: result.done,
-            });
+                result.reward as f32,
+                next_state_f32.clone(),
+                result.done,
+            );
 
-            // Train with Burn's TrainStep
-            #[allow(deprecated)]
+            // Train with GPU-native sampling
             if agent.buffer.len() >= agent.config.batch_size {
-                if let Some(batch) = agent.buffer.sample_batch(agent.config.batch_size) {
-                    let loss = agent.train_step(batch);
+                if let Some(loss) = agent.train_step_gpu_native(agent.config.batch_size) {
                     losses.push(loss);
                     episode_loss += loss;
                     loss_count += 1;

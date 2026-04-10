@@ -11,9 +11,11 @@
 // - Target network updates work correctly
 
 use burn::backend::{Autodiff, NdArray};
+use eris::config::CombinedBanditDQNConfig;
+use eris::models::CombinedModelConfig;
 use eris::training::{
-    CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer, TrainingConfig, Transition,
-    create_dummy_transition, fill_buffer,
+    create_dummy_transition, fill_buffer, CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer,
+    TrainingConfig, Transition,
 };
 
 #[test]
@@ -126,12 +128,12 @@ fn test_replay_buffer_empty() {
 fn test_training_config_default() {
     let config = TrainingConfig::default();
 
-    assert_eq!(config.learning_rate, 0.001);
+    assert_eq!(config.learning_rate, 0.0001);
     assert_eq!(config.gamma, 0.99);
     assert_eq!(config.epsilon_start, 1.0);
     assert_eq!(config.epsilon_end, 0.01);
     assert_eq!(config.epsilon_decay, 0.995);
-    assert_eq!(config.batch_size, 512); // Updated for GPU utilization
+    assert_eq!(config.batch_size, 2048); // Updated for GPU utilization
     assert_eq!(config.buffer_capacity, 10_000);
     assert_eq!(config.target_update_freq, 1000);
     assert_eq!(config.tau, 0.005);
@@ -183,7 +185,7 @@ fn test_transition_batch() {
 type TestBackend = Autodiff<NdArray>;
 
 fn create_test_agent() -> CombinedAgent<TestBackend> {
-    use eris::models::CombinedModelConfig;
+    use eris::model::ErisDefaults;
 
     let device = Default::default();
     let config = TrainingConfig::default();
@@ -191,7 +193,7 @@ fn create_test_agent() -> CombinedAgent<TestBackend> {
     let env = MockEnv::new(100);
     let state_dim = env.observation_dim();
     let action_dim = env.num_actions();
-    let model_config = CombinedModelConfig::new(state_dim, 20, 128, action_dim);
+    let model_config = ErisDefaults::storage_tier_model(state_dim, action_dim);
 
     CombinedAgent::new(config, model_config, device)
 }
@@ -270,7 +272,7 @@ fn test_mock_env_reset() {
     let mut env = MockEnv::new(10);
 
     let state = env.reset();
-    assert_eq!(state.len(), 15);
+    assert_eq!(state.len(), 32);
     assert!(state.iter().all(|&x| x == 0.0));
 
     let _ = env.step(5);
@@ -288,7 +290,7 @@ fn test_mock_env_step() {
     env.reset();
 
     let (next_state, reward, done) = env.step(5);
-    assert_eq!(next_state.len(), 15);
+    assert_eq!(next_state.len(), 32);
     assert!(reward > 0.0);
     assert!(!done);
 
@@ -312,12 +314,12 @@ fn test_checkpoint_metadata() {
 fn test_training_config_defaults() {
     let config = TrainingConfig::default();
 
-    assert_eq!(config.learning_rate, 0.001);
+    assert_eq!(config.learning_rate, 0.0001);
     assert_eq!(config.gamma, 0.99);
     assert_eq!(config.epsilon_start, 1.0);
     assert_eq!(config.epsilon_end, 0.01);
     assert_eq!(config.epsilon_decay, 0.995);
-    assert_eq!(config.batch_size, 512); // Updated for GPU utilization
+    assert_eq!(config.batch_size, 2048); // Updated for GPU utilization
     assert_eq!(config.buffer_capacity, 10_000);
     assert_eq!(config.target_update_freq, 1000);
     assert_eq!(config.tau, 0.005);

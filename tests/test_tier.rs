@@ -1,6 +1,6 @@
-use eris::config::TierConfig;
-use eris::features::{HotnessConfig, hotness_score};
+use eris::features::{hotness_score, HotnessConfig};
 use eris::tier::{BufferEnv, Tier, TierSelector};
+use eris::TierConfig; // Old TierConfig from config_old
 
 #[test]
 fn test_tier_write_within_capacity() {

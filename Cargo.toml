@@ -1,19 +1,48 @@
+[workspace]
+members = ["burnme-rly", "."]
+resolver = "2"
+
 [package]
 name = "eris"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [features]
-default = []
+default = ["wgpu", "parallel"]
 # Backend features (mutually exclusive - choose ONE)
 # CPU backend (no GPU)
-cpu-only = ["burn/ndarray", "burn/autodiff", "burn/train", "burn/dataset"]
+cpu = ["burn/ndarray", "burn/train", "burn/dataset"]
 # GPU backends
-wgpu-only = ["burn/wgpu", "burn/autodiff", "burn/train", "burn/dataset"]
-cuda-only = ["burn/cuda", "burn/autodiff", "burn/train", "burn/dataset"]
-rocm-only = ["burn/rocm", "burn/autodiff", "burn/train", "burn/dataset"]
+wgpu = [
+  "burn/wgpu",
+  "burn/autodiff",
+  "burn/train",
+  "burn/dataset",
+  "burn/fusion",
+]
+cuda = [
+  "burn/cuda",
+  "burn/autodiff",
+  "burn/train",
+  "burn/dataset",
+  "burn/fusion",
+]
+rocm = [
+  "burn/rocm",
+  "burn/autodiff",
+  "burn/train",
+  "burn/dataset",
+  "burn/fusion",
+]
+
+# Profiling feature (requires Tracy server running)
+profiling = ["tracy-client"]
+
+# Parallel environment stepping
+parallel = ["rayon"]
 
 [dependencies]
+burnme-rly = { path = "burnme-rly" }
 postcard = { version = "1.1", features = ["alloc", "use-crc"] }
 burn = { version = "0.20", default-features = false }
 chrono = "0.4.44"
@@ -27,17 +56,22 @@ memmap2 = "0.9.10"
 rand = "0.10.0"
 rand_pcg = "0.10.0"
 rand_distr = "0.6.0"
-rayon = "1.11"
+rayon = { version = "1.11", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+tracy-client = { version = "0.18", optional = true }
 toml = "1.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
 
 [dev-dependencies]
 approx = "0.5.1"
 criterion = "0.8.2"
 proptest = "1.11.0"
 tempfile = "3.20"
-

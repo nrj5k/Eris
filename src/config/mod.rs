@@ -68,11 +68,13 @@
 //! - `combined_config`: Combined bandit-DQN configuration
 
 mod bandit_config;
+mod batch_tuner;
 mod combined_config;
 mod dqn_config;
 mod training_config;
 
 pub use bandit_config::{BanditConfig, BanditConfigBuilder};
+pub use batch_tuner::BatchTuner;
 pub use combined_config::{CombinedBanditDQNConfig, CombinedBanditDQNConfigBuilder};
 pub use dqn_config::{DQNConfig, DQNConfigBuilder};
 pub use training_config::{

@@ -1,9 +1,67 @@
 //! Device creation module for GPU/CPU backend selection
 
+/// Runtime device selection enum
+#[derive(Clone, Debug)]
+pub enum Device {
+    #[cfg(feature = "cpu")]
+    Cpu(burn::backend::ndarray::NdArrayDevice),
+    #[cfg(feature = "wgpu")]
+    Wgpu(burn::backend::wgpu::WgpuDevice),
+    #[cfg(feature = "cuda")]
+    Cuda(burn::backend::cuda::CudaDevice),
+    #[cfg(feature = "rocm")]
+    Rocm(burn::backend::rocm::RocmDevice),
+}
+
+impl Device {
+    /// Create device from string (for CLI argument parsing)
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            #[cfg(feature = "cpu")]
+            "cpu" => Some(Device::Cpu(burn::backend::ndarray::NdArrayDevice::default())),
+            #[cfg(feature = "wgpu")]
+            "wgpu" | "gpu" => Some(Device::Wgpu(burn::backend::wgpu::WgpuDevice::default())),
+            #[cfg(feature = "cuda")]
+            "cuda" => Some(Device::Cuda(burn::backend::cuda::CudaDevice::default())),
+            #[cfg(feature = "rocm")]
+            "rocm" => Some(Device::Rocm(burn::backend::rocm::RocmDevice::default())),
+            _ => None,
+        }
+    }
+
+    /// Get device name as string
+    pub fn name(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "cpu")]
+            Device::Cpu(_) => "cpu",
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(_) => "wgpu",
+            #[cfg(feature = "cuda")]
+            Device::Cuda(_) => "cuda",
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => "rocm",
+        }
+    }
+}
+
+/// Get list of available backends at compile time
+pub fn available_backends() -> Vec<&'static str> {
+    let mut backends = Vec::new();
+    #[cfg(feature = "cpu")]
+    backends.push("cpu");
+    #[cfg(feature = "wgpu")]
+    backends.push("wgpu");
+    #[cfg(feature = "cuda")]
+    backends.push("cuda");
+    #[cfg(feature = "rocm")]
+    backends.push("rocm");
+    backends
+}
+
 /// Create device based on backend string
 pub fn create_device(backend: &str) -> Box<dyn std::any::Any> {
     match backend {
-        #[cfg(feature = "cpu-only")]
+        #[cfg(feature = "cpu")]
         "cpu" | "ndarray" => {
             println!("Creating NdArray CPU device...");
             use burn::backend::NdArray;
@@ -11,7 +69,7 @@ pub fn create_device(backend: &str) -> Box<dyn std::any::Any> {
             Box::new(device)
         }
 
-        #[cfg(feature = "wgpu-only")]
+        #[cfg(feature = "wgpu")]
         "gpu" | "wgpu" => {
             println!("Creating Wgpu GPU device...");
             use burn::backend::Wgpu;
@@ -19,7 +77,7 @@ pub fn create_device(backend: &str) -> Box<dyn std::any::Any> {
             Box::new(device)
         }
 
-        #[cfg(feature = "cuda-only")]
+        #[cfg(feature = "cuda")]
         "cuda" | "nvidia" => {
             println!("Creating CUDA device...");
             use burn::backend::Cuda;
@@ -27,7 +85,7 @@ pub fn create_device(backend: &str) -> Box<dyn std::any::Any> {
             Box::new(device)
         }
 
-        #[cfg(feature = "rocm-only")]
+        #[cfg(feature = "rocm")]
         "rocm" | "amd" => {
             println!("Creating ROCm device...");
             use burn::backend::Rocm;
@@ -36,19 +94,19 @@ pub fn create_device(backend: &str) -> Box<dyn std::any::Any> {
         }
 
         _ => {
-            #[cfg(feature = "cpu-only")]
+            #[cfg(feature = "cpu")]
             let available = "cpu";
-            #[cfg(feature = "wgpu-only")]
+            #[cfg(feature = "wgpu")]
             let available = "wgpu";
-            #[cfg(feature = "cuda-only")]
+            #[cfg(feature = "cuda")]
             let available = "cuda";
-            #[cfg(feature = "rocm-only")]
+            #[cfg(feature = "rocm")]
             let available = "rocm";
             #[cfg(not(any(
-                feature = "cpu-only",
-                feature = "wgpu-only",
-                feature = "cuda-only",
-                feature = "rocm-only"
+                feature = "cpu",
+                feature = "wgpu",
+                feature = "cuda",
+                feature = "rocm"
             )))]
             let available = "none";
 
@@ -64,16 +122,16 @@ pub fn create_device(backend: &str) -> Box<dyn std::any::Any> {
 /// Check if a backend is available
 pub fn is_backend_available(backend: &str) -> bool {
     match backend {
-        #[cfg(feature = "cpu-only")]
+        #[cfg(feature = "cpu")]
         "cpu" | "ndarray" => true,
 
-        #[cfg(feature = "wgpu-only")]
+        #[cfg(feature = "wgpu")]
         "gpu" | "wgpu" => true,
 
-        #[cfg(feature = "cuda-only")]
+        #[cfg(feature = "cuda")]
         "cuda" | "nvidia" => true,
 
-        #[cfg(feature = "rocm-only")]
+        #[cfg(feature = "rocm")]
         "rocm" | "amd" => true,
 
         _ => false,

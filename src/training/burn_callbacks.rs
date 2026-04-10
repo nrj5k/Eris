@@ -51,14 +51,14 @@ impl TargetUpdateCallback {
 
     /// Increment step counter and check if should update target network
     pub fn should_update(&self) -> bool {
-        let mut count = self.step_count.lock().unwrap();
+        let mut count = self.step_count.lock().expect("step_count mutex poisoned");
         *count += 1;
-        *count % self.update_freq == 0
+        self.update_freq > 0 && *count % self.update_freq == 0
     }
 
     /// Reset step counter
     pub fn reset(&self) {
-        let mut count = self.step_count.lock().unwrap();
+        let mut count = self.step_count.lock().expect("step_count mutex poisoned");
         *count = 0;
     }
 }
@@ -107,7 +107,7 @@ impl EpsilonDecayCallback {
 
     /// Get current epsilon value
     pub fn epsilon(&self) -> f32 {
-        *self.epsilon.lock().unwrap()
+        *self.epsilon.lock().expect("epsilon mutex poisoned")
     }
 
     /// Get reference to epsilon for external modification
@@ -117,7 +117,7 @@ impl EpsilonDecayCallback {
 
     /// Apply decay once
     pub fn decay(&mut self) {
-        let mut eps = self.epsilon.lock().unwrap();
+        let mut eps = self.epsilon.lock().expect("epsilon mutex poisoned");
         *eps = (*eps * self.decay_rate).max(self.epsilon_end);
     }
 }
@@ -155,16 +155,16 @@ impl RewardTrackingCallback {
 
     /// Add reward from completed episode
     pub fn add_reward(&self, reward: f32) {
-        let mut sum = self.sum.lock().unwrap();
-        let mut count = self.count.lock().unwrap();
+        let mut sum = self.sum.lock().expect("sum mutex poisoned");
+        let mut count = self.count.lock().expect("count mutex poisoned");
         *sum += reward;
         *count += 1;
     }
 
     /// Get average reward
     pub fn average_reward(&self) -> f32 {
-        let sum = *self.sum.lock().unwrap();
-        let count = *self.count.lock().unwrap();
+        let sum = *self.sum.lock().expect("sum mutex poisoned");
+        let count = *self.count.lock().expect("count mutex poisoned");
         if count > 0 {
             sum / count as f32
         } else {
@@ -174,18 +174,18 @@ impl RewardTrackingCallback {
 
     /// Get total reward
     pub fn total_reward(&self) -> f32 {
-        *self.sum.lock().unwrap()
+        *self.sum.lock().expect("sum mutex poisoned")
     }
 
     /// Get episode count
     pub fn episode_count(&self) -> usize {
-        *self.count.lock().unwrap()
+        *self.count.lock().expect("count mutex poisoned")
     }
 
     /// Reset tracking
     pub fn reset(&self) {
-        let mut sum = self.sum.lock().unwrap();
-        let mut count = self.count.lock().unwrap();
+        let mut sum = self.sum.lock().expect("sum mutex poisoned");
+        let mut count = self.count.lock().expect("count mutex poisoned");
         *sum = 0.0;
         *count = 0;
     }
@@ -248,7 +248,10 @@ mod tests {
         assert_eq!(callback.update_freq, 100);
 
         // Step counter should start at 0
-        let count = callback.step_count.lock().unwrap();
+        let count = callback
+            .step_count
+            .lock()
+            .expect("step_count mutex poisoned in test");
         assert_eq!(*count, 0);
     }
 
@@ -285,7 +288,21 @@ mod tests {
         callback.reset();
 
         // Counter should be 0
-        let count = callback.step_count.lock().unwrap();
+        let count = callback
+            .step_count
+            .lock()
+            .expect("step_count mutex poisoned in test");
         assert_eq!(*count, 0);
+    }
+
+    #[test]
+    fn test_target_update_zero_freq_no_panic() {
+        // Test that zero update frequency doesn't panic
+        let callback = TargetUpdateCallback::new(0);
+
+        // Should never trigger update
+        assert!(!callback.should_update());
+        assert!(!callback.should_update());
+        assert!(!callback.should_update());
     }
 }

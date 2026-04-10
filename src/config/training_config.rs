@@ -137,6 +137,9 @@ pub struct TrainingParams {
     /// Replay buffer size
     #[serde(default = "default_replay_buffer_size")]
     pub replay_buffer_size: usize,
+    /// DataLoader worker threads (0 = single-threaded)
+    #[serde(default = "default_num_workers")]
+    pub num_workers: usize,
 }
 
 fn default_episodes() -> usize {
@@ -146,7 +149,7 @@ fn default_max_steps() -> usize {
     1000
 }
 fn default_batch_size() -> usize {
-    512
+    2048 // Optimized for GPU utilization (multiple of 32 for warp alignment)
 }
 fn default_learning_rate() -> f64 {
     0.001
@@ -169,6 +172,9 @@ fn default_target_update_freq() -> usize {
 fn default_replay_buffer_size() -> usize {
     10000
 }
+fn default_num_workers() -> usize {
+    2 // Phase 04: optimized for VecEnv (16 envs) with GPU training
+}
 
 impl Default for TrainingParams {
     fn default() -> Self {
@@ -183,6 +189,7 @@ impl Default for TrainingParams {
             epsilon_decay: default_epsilon_decay(),
             target_update_freq: default_target_update_freq(),
             replay_buffer_size: default_replay_buffer_size(),
+            num_workers: default_num_workers(),
         }
     }
 }
@@ -370,6 +377,7 @@ impl TrainingConfig {
         gamma: Option<f32>,
         backend: Option<String>,
         model: Option<String>,
+        num_workers: Option<usize>,
     ) {
         if let Some(ep) = episodes {
             self.training.episodes = ep;
@@ -403,6 +411,9 @@ impl TrainingConfig {
                 "simple_dqn" => ModelArchitecture::SimpleDQN,
                 _ => ModelArchitecture::DuelingDQN,
             };
+        }
+        if let Some(nw) = num_workers {
+            self.training.num_workers = nw;
         }
     }
 }
@@ -473,6 +484,7 @@ device_id = 0
             Some(0.95),
             Some("gpu".to_string()),
             Some("bandit_dqn".to_string()),
+            Some(4),
         );
         assert_eq!(config.training.episodes, 50);
         assert_eq!(config.training.max_steps, 500);
@@ -481,5 +493,12 @@ device_id = 0
         assert_eq!(config.training.gamma, 0.95);
         assert_eq!(config.backend.backend_type, BackendType::Gpu);
         assert_eq!(config.model.architecture, ModelArchitecture::BanditDQN);
+        assert_eq!(config.training.num_workers, 4);
+    }
+
+    #[test]
+    fn test_default_num_workers() {
+        let config = TrainingConfig::default();
+        assert_eq!(config.training.num_workers, 2);
     }
 }

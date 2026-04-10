@@ -17,6 +17,10 @@ pub struct CheckpointMetadata {
     pub best_reward: f32,
     pub avg_reward_10: f32,
     pub timestamp: String,
+    /// Model architecture dimensions for compatibility checking
+    pub state_dim: Option<usize>,
+    pub action_dim: Option<usize>,
+    pub feature_dim: Option<usize>,
 }
 
 impl CheckpointMetadata {
@@ -34,7 +38,85 @@ impl CheckpointMetadata {
             best_reward,
             avg_reward_10,
             timestamp: chrono::Utc::now().to_rfc3339(),
+            state_dim: None,
+            action_dim: None,
+            feature_dim: None,
         }
+    }
+
+    /// Create new metadata with model dimensions for checkpoint compatibility checking
+    pub fn new_with_dims(
+        epoch: usize,
+        step_count: usize,
+        epsilon: f32,
+        best_reward: f32,
+        avg_reward_10: f32,
+        state_dim: usize,
+        action_dim: usize,
+        feature_dim: usize,
+    ) -> Self {
+        Self {
+            epoch,
+            step_count,
+            epsilon,
+            best_reward,
+            avg_reward_10,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            state_dim: Some(state_dim),
+            action_dim: Some(action_dim),
+            feature_dim: Some(feature_dim),
+        }
+    }
+
+    /// Check if checkpoint dimensions match the expected model dimensions
+    pub fn check_dimensions(
+        &self,
+        expected_state_dim: usize,
+        expected_action_dim: usize,
+        expected_feature_dim: usize,
+    ) -> Result<(), String> {
+        // If checkpoint doesn't have dimension info, skip check (old checkpoint)
+        if self.state_dim.is_none() && self.action_dim.is_none() && self.feature_dim.is_none() {
+            return Ok(());
+        }
+
+        // Check state dimension
+        if let Some(saved_state_dim) = self.state_dim {
+            if saved_state_dim != expected_state_dim {
+                return Err(format!(
+                    "Model dimension mismatch: checkpoint was trained with state_dim={}, \
+                     but current model expects state_dim={}. \
+                     Please delete old checkpoints and retrain, or use matching dimensions.",
+                    saved_state_dim, expected_state_dim
+                ));
+            }
+        }
+
+        // Check action dimension
+        if let Some(saved_action_dim) = self.action_dim {
+            if saved_action_dim != expected_action_dim {
+                return Err(format!(
+                    "Model dimension mismatch: checkpoint was trained with action_dim={}, \
+                     but current model expects action_dim={}. \
+                     Please delete old checkpoints and retrain, or use matching dimensions.",
+                    saved_action_dim, expected_action_dim
+                ));
+            }
+        }
+
+        // Check feature dimension
+        if let Some(saved_feature_dim) = self.feature_dim {
+            if saved_feature_dim != expected_feature_dim {
+                return Err(format!(
+                    "Model dimension mismatch: checkpoint was trained with feature_dim={}, \
+                     but current model expects feature_dim={}. \
+                     Please delete old checkpoints and retrain, or use matching dimensions.",
+                    saved_feature_dim, expected_feature_dim
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 

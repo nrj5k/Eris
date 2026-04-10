@@ -48,6 +48,7 @@ use super::Space;
 ///
 /// - No panics - all methods safely handle edge cases
 /// - Contains validation rejects out-of-range values
+#[derive(Debug, Clone)]
 pub struct DiscreteSpace {
     /// Number of possible actions
     pub n: usize,

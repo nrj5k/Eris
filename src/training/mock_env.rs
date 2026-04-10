@@ -66,7 +66,7 @@ pub struct MockEnv {
 }
 
 impl MockEnv {
-    /// Create a new MockEnv with default dimensions (15 obs, 10 actions).
+    /// Create a new MockEnv with default dimensions (32 obs, 10 actions).
     ///
     /// # Arguments
     ///
@@ -74,8 +74,8 @@ impl MockEnv {
     ///
     /// # Backward Compatibility
     ///
-    /// This maintains the original API with hardcoded dimensions:
-    /// - Observation dimension: 15
+    /// This maintains the original API with warp-aligned dimensions:
+    /// - Observation dimension: 32 (warp size for GPU optimization)
     /// - Number of actions: 10
     ///
     /// # Example
@@ -84,11 +84,11 @@ impl MockEnv {
     /// use eris::training::MockEnv;
     ///
     /// let env = MockEnv::new(10);
-    /// assert_eq!(env.observation_dim(), 15);
+    /// assert_eq!(env.observation_dim(), 32);
     /// assert_eq!(env.num_actions(), 10);
     /// ```
     pub fn new(max_steps: usize) -> Self {
-        Self::new_with_dims(max_steps, 15, 10)
+        Self::new_with_dims(max_steps, 32, 10)
     }
 
     /// Create a new MockEnv with custom dimensions.
@@ -178,7 +178,7 @@ impl MockEnv {
     /// use eris::training::MockEnv;
     /// let mut env = MockEnv::new(10);
     /// let obs = env.reset();
-    /// assert_eq!(obs.len(), 15);
+    /// assert_eq!(obs.len(), 32);
     /// ```
     pub fn reset(&mut self) -> Vec<f64> {
         self.step_count = 0;
@@ -205,7 +205,7 @@ impl MockEnv {
     /// let mut env = MockEnv::new(10);
     /// let obs = env.reset();
     /// let (next_state, reward, done) = env.step(0);
-    /// assert_eq!(next_state.len(), 15);
+    /// assert_eq!(next_state.len(), 32);
     /// assert!(reward > 0.0);
     /// ```
     pub fn step(&mut self, action: usize) -> (Vec<f64>, f64, bool) {
@@ -254,7 +254,7 @@ impl MockEnv {
     /// ```
     /// use eris::training::MockEnv;
     /// let env = MockEnv::new(10);
-    /// assert_eq!(env.observation_space(), 15);
+    /// assert_eq!(env.observation_space(), 32);
     /// ```
     pub fn observation_space(&self) -> usize {
         self.obs_dim
@@ -399,7 +399,7 @@ impl Environment for MockEnv {
     }
 }
 
-/// Create dummy transition for testing with default dimensions (15 obs, 10 actions).
+/// Create dummy transition for testing with default dimensions (32 obs, 10 actions).
 ///
 /// This function provides backward compatibility with hardcoded dimensions.
 /// For custom dimensions, use [`create_dummy_transition_with_dims()`].
@@ -414,10 +414,10 @@ impl Environment for MockEnv {
 /// use eris::training::create_dummy_transition;
 ///
 /// let trans = create_dummy_transition();
-/// assert_eq!(trans.state.len(), 15);
+/// assert_eq!(trans.state.len(), 32);
 /// ```
 pub fn create_dummy_transition() -> Transition {
-    create_dummy_transition_with_dims(15, 10)
+    create_dummy_transition_with_dims(32, 10)
 }
 
 /// Create dummy transition with custom dimensions.
@@ -466,7 +466,7 @@ pub fn create_dummy_transition_with_dims(obs_dim: usize, _num_actions: usize) ->
 /// use eris::training::fill_buffer;
 ///
 /// let mut buffer = ReplayBuffer::new(100);
-/// fill_buffer(&mut buffer, 50, 15, 10);
+/// fill_buffer(&mut buffer, 50, 32, 10);
 /// assert_eq!(buffer.len(), 50);
 /// ```
 pub fn fill_buffer(

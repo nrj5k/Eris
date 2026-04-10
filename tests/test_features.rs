@@ -1,8 +1,8 @@
-use eris::config::TierConfig;
 use eris::features::{
-    AccessRecord, AccessTracker, BlobFeatures, HotnessConfig, encode_state, hotness_score,
+    encode_state, hotness_score, AccessRecord, AccessTracker, BlobFeatures, HotnessConfig,
 };
 use eris::trace::{BlobData, IoOp};
+use eris::TierConfig; // Old TierConfig from config_old
 
 fn create_test_blob(offset_id: &str) -> BlobData {
     BlobData {
@@ -166,7 +166,7 @@ fn test_blob_features_extraction() {
     approx::assert_relative_eq!(features.overwrite_amount, 0.5, epsilon = 1e-5);
 
     let vec = features.to_vec();
-    assert_eq!(vec.len(), 10);
+    assert_eq!(vec.len(), 32, "Features must be padded to warp size 32");
 }
 
 #[test]
@@ -383,7 +383,7 @@ fn test_state_encoding_dimensions() {
 
     let state = encode_state(&tier_sizes, &features, &tier_configs);
 
-    assert_eq!(state.len(), 15); // 5 tier sizes + 10 features
+    assert_eq!(state.len(), 32, "State must be padded to warp size 32"); // 5 tier sizes + 10 features + 17 padding
 }
 
 #[test]

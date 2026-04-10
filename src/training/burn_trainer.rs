@@ -193,7 +193,7 @@ mod tests {
 
         // Actions: [0, 1, 0, 1]
         let actions: Tensor<TestBackend, 1, Int> = Tensor::from_data(
-            TensorData::new(vec![0i64, 1i64, 0i64, 1i64], [4]).convert::<i64>(),
+            TensorData::new(vec![0i32, 1i32, 0i32, 1i32], [4]).convert::<i32>(),
             &device,
         );
 
@@ -228,7 +228,7 @@ mod tests {
 
         // Actions: [0, 1, 0, 1]
         let actions: Tensor<TestBackend, 1, Int> = Tensor::from_data(
-            TensorData::new(vec![0i64, 1i64, 0i64, 1i64], [4]).convert::<i64>(),
+            TensorData::new(vec![0i32, 1i32, 0i32, 1i32], [4]).convert::<i32>(),
             &device,
         );
 

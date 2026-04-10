@@ -1,0 +1,12 @@
+--- src/policies/tensor_utils.rs
++++ src/policies/tensor_utils.rs
+@@ -248,7 +248,7 @@ pub fn batch_to_tensors<B: Backend>(
+         .collect();
+ 
+     // Extract actions (discrete action indices)
+-    let actions: Vec<i64> = batch
++    let actions: Vec<i32> = batch
+         .iter()
+         .map(|t| match t.action {
+-            Action::Discrete(a) => a as i64,
++            Action::Discrete(a) => a as i32,
