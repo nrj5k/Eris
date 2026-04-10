@@ -1,0 +1,149 @@
+# Example: Comparing Multiple Policies
+#
+# This configuration file shows how to set up experiments comparing
+# different policies and exploration strategies.
+#
+# Run each policy separately with:
+#   cargo run --release --bin train_model -- --config config/comparison_example.toml --model <MODEL>
+#
+# Where <MODEL> is one of: metis, dqn, bandit
+
+# =============================================================================
+# Policy 1: METIS (Combined DQN + Bandit) - Recommended for Production
+# =============================================================================
+[metis]
+type = "metis"
+description = "Combined policy with bandit feature extraction + DQN Q-learning"
+
+# DQN Configuration
+dqn_state_dim = 15
+dqn_action_dim = 10
+dqn_hidden_layers = [128, 128]
+dqn_dueling = true
+
+# Bandit Configuration
+bandit_feature_dim = 20
+bandit_hidden_layers = [64, 128]
+num_tiers = 5
+
+# Training
+learning_rate = 0.0001
+gamma = 0.99
+batch_size = 512
+
+# Exploration (Thompson Sampling works well)
+exploration = "thompson_sampling"
+prior_mean = 0.0
+prior_std = 1.0
+
+# =============================================================================
+# Policy 2: Standalone DQN - Simpler Baseline
+# =============================================================================
+[dqn]
+type = "dqn"
+description = "Pure Q-learning without bandit features"
+
+state_dim = 15
+action_dim = 10
+hidden_layers = [128, 128]
+dueling = true
+
+# Training
+learning_rate = 0.0001
+gamma = 0.99
+batch_size = 512
+buffer_capacity = 100000
+
+# Exploration (Epsilon-Greedy is standard for DQN)
+exploration = "epsilon_greedy"
+epsilon_start = 1.0
+epsilon_end = 0.01
+epsilon_decay = 0.995
+
+# =============================================================================
+# Policy 3: Standalone Bandit - Fast Online Learning
+# =============================================================================
+[bandit]
+type = "bandit"
+description = "Contextual bandit for fast adaptive decisions"
+
+state_dim = 15
+feature_dim = 20
+hidden_layers = [64, 128]
+num_tiers = 5
+
+# Training
+learning_rate = 0.01  # Higher for online learning
+
+# Exploration (Thompson Sampling recommended for bandits)
+exploration = "thompson_sampling"
+prior_mean = 0.0
+prior_std = 1.0
+
+# =============================================================================
+# Common Training Settings (applies to all policies)
+# =============================================================================
+[common]
+episodes = 100
+max_steps = 1000
+seed = 42  # For reproducibility
+
+[checkpoint]
+output_dir = "checkpoints/comparison"
+save_interval = 10
+
+# =============================================================================
+# Exploration Strategy Comparison Guide
+# =============================================================================
+# 
+# Epsilon-Greedy:
+#   - When to use: Simple baseline, well-understood behavior
+#   - Pros: Easy to tune, predictable
+#   - Cons: Doesn't adapt to uncertainty, sub-optimal for bandits
+#   - Parameters: epsilon_start, epsilon_end, epsilon_decay
+#
+# Thompson Sampling:
+#   - When to use: Bandit problems, non-stationary environments
+#   - Pros: Principled uncertainty handling, optimal for bandits
+#   - Cons: More complex, maintains posteriors
+#   - Parameters: prior_mean, prior_std
+#
+# UCB (Upper Confidence Bound):
+#   - When to use: Theoretically optimal regret, stationary environments
+#   - Pros: Provable bounds, automatic exploration/exploitation balance
+#   - Cons: Assumes stationarity, can be aggressive
+#   - Parameters: c (exploration constant)
+#
+# Recommendations:
+#   - For DQN: Start with epsilon-greedy, try Thompson Sampling
+#   - For Bandit: Use Thompson Sampling or UCB
+#   - For METIS: Thompson Sampling often best
+
+# =============================================================================
+# How to Run Comparisons
+# =============================================================================
+#
+# 1. Train each policy:
+#    cargo run --release --bin train_model -- --model metis --episodes 100
+#    cargo run --release --bin train_model -- --model dqn --episodes 100
+#    cargo run --release --bin train_model -- --model bandit --episodes 100
+#
+# 2. Compare with different exploration:
+#    # DQN with Thompson Sampling
+#    cargo run --release --bin train_model -- --model dqn --exploration thompson-sampling
+#    
+#    # DQN with UCB
+#    cargo run --release --bin train_model -- --model dqn --exploration ucb --ucb-c 2.0
+#
+# 3. Analyze results:
+#    # Checkpoints are saved in:
+#    # - checkpoints/metis/
+#    # - checkpoints/dqn/
+#    # - checkpoints/bandit/
+#
+# 4. Plot performance:
+#    # Use Python/Jupyter to plot:
+#    # - Episode rewards over time
+#    # - Loss curves
+#    # - Exploration parameter decay
+#    # - Action selection distributions

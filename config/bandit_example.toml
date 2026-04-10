@@ -1,0 +1,57 @@
+# Bandit Policy Configuration Example
+#
+# This file demonstrates configuration for the standalone contextual bandit
+# policy without DQN Q-learning.
+#
+# Usage:
+#   cargo run --bin train_model -- --config config/bandit_example.toml
+
+[model]
+type = "bandit"
+state_dim = 15
+feature_dim = 20          # Internal feature representation size
+hidden_layers = [64, 128] # Bandit network architecture
+num_tiers = 5             # Number of cache tiers
+
+[training]
+episodes = 100
+max_steps = 1000
+learning_rate = 0.01     # Higher learning rate for online updates
+
+[exploration]
+# Thompson Sampling works best for bandits (recommended)
+strategy = "thompson_sampling"
+prior_mean = 0.0
+prior_std = 1.0          # Prior uncertainty - adapts during training
+
+# Alternative: UCB (comment out thompson_sampling above)
+# strategy = "ucb"
+# c = 2.0                  # Higher c = more exploration
+
+# Alternative: Epsilon-Greedy (comment out thompson_sampling above)
+# strategy = "epsilon_greedy"
+# epsilon_start = 1.0
+# epsilon_end = 0.01
+# epsilon_decay = 0.995
+
+[checkpoint]
+save_interval = 10
+output_dir = "checkpoints/bandit"
+
+# Why Bandit for Cache Policies?
+# 1. Fast online learning - no replay buffer needed
+# 2. Immediate adaptation to workload changes
+# 3. Lower memory footprint than DQN
+# 4. Ideal for real-time tier selection
+#
+# Thompson Sampling vs UCB for Bandits:
+# - Thompson Sampling: Better for non-stationary environments
+# - UCB: Theoretically optimal for stationary bandits
+# - Both work well; Thompson Sampling often preferred in practice
+#
+# Tips for Bandit Training:
+# 1. Use higher learning rate than DQN (0.01 - 0.001)
+# 2. Thompson Sampling or UCB preferred over epsilon-greedy
+# 3. Smaller network than DQN (64-128 hidden units suffice)
+# 4. Monitor importance scores during training
+# 5. Bandit converges faster but may not reach optimal as DQN

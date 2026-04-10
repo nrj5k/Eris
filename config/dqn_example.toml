@@ -1,0 +1,54 @@
+# DQN Policy Configuration Example
+# 
+# This file demonstrates configuration for the standalone DQN policy
+# without bandit feature extraction.
+#
+# Usage:
+#   cargo run --bin train_model -- --config config/dqn_example.toml
+
+[model]
+type = "dqn"
+state_dim = 15
+action_dim = 10
+hidden_layers = [128, 128]
+dueling = true  # Use dueling DQN architecture
+
+[training]
+episodes = 100
+max_steps = 1000
+learning_rate = 0.0001
+gamma = 0.99
+batch_size = 512
+buffer_capacity = 100000
+target_update_freq = 1000  # Update target network every N steps
+
+[exploration]
+# Choose one of the three strategies:
+
+# Option 1: Epsilon-Greedy (standard for DQN)
+strategy = "epsilon_greedy"
+epsilon_start = 1.0        # Start with full exploration
+epsilon_end = 0.01        # End with 99% exploitation
+epsilon_decay = 0.995    # Decay rate per episode
+
+# Option 2: Thompson Sampling (comment out epsilon_greedy above)
+# strategy = "thompson_sampling"
+# prior_mean = 0.0
+# prior_std = 1.0          # Higher = more exploration initially
+
+# Option 3: UCB (comment out epsilon_greedy and thompson_sampling above)
+# strategy = "ucb"
+# c = 2.0                  # Exploration constant (1.0-3.0 typical)
+
+[checkpoint]
+save_interval = 10        # Save every N episodes
+output_dir = "checkpoints/dqn"
+
+# Tips for DQN Training:
+# 1. Start with epsilon-greedy for simple problems
+# 2. Use Thompson Sampling for non-stationary environments
+# 3. Use UCB for theoretically optimal regret bounds
+# 4. Adjust learning_rate based on convergence (0.0001 - 0.001 typical)
+# 5. Larger batch_size (256-512) improves stability
+# 6. Gamma close to 1.0 (0.99) for long-term value estimation
+# 7. Target update frequency: 1000-5000 steps typical
