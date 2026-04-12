@@ -1,0 +1,459 @@
+//! Core traits for GPU-native training
+//!
+//! This module defines the key abstractions that enable GPU-native training
+//! across different policy types (DQN, Bandit, Catcher, Metis, etc.).
+
+#![allow(unexpected_cfgs)]
+#![allow(deprecated)]
+
+use crate::buffer::{CpuRingBuffer, TensorRingBuffer};
+use crate::env::StepResult;
+use crate::space::DiscreteSpace;
+use burn::tensor::backend::AutodiffBackend;
+use std::error::Error;
+
+/// Trait for agents that support GPU-native training with CpuRingBuffer.
+///
+/// This trait abstracts GPU-native training operations that work
+/// across different policy types (DQN, Bandit, Catcher, Metis, etc.).
+///
+/// # Example
+/// ```ignore
+/// use burnme_rly::traits::GpuTrainable;
+/// use burnme_rly::buffer::CpuRingBuffer;
+/// use burn::tensor::backend::AutodiffBackend;
+///
+/// // Implement for your policy
+/// struct MyPolicy<B: AutodiffBackend> {
+///     buffer: CpuRingBuffer,
+///     warmup_complete: bool,
+///     step_count: usize,
+///     // ... other fields
+/// }
+///
+/// impl<B: AutodiffBackend> GpuTrainable<B> for MyPolicy<B> {
+///     fn buffer_mut(&mut self) -> &mut CpuRingBuffer {
+///         &mut self.buffer
+///     }
+///     
+///     fn buffer(&self) -> &CpuRingBuffer {
+///         &self.buffer
+///     }
+///     
+///     fn train_step_gpu_native(&mut self, steps_since_last_train: usize) -> Option<f32> {
+///         // GPU-native training implementation
+///         None
+///     }
+///     
+///     fn warmup_batch_size(&self) -> usize { 256 }
+///     fn is_warmup_complete(&self) -> bool { self.warmup_complete }
+///     fn set_warmup_complete(&mut self, complete: bool) { self.warmup_complete = complete; }
+///     fn epsilon(&self) -> f32 { 1.0 }
+///     fn step_count(&self) -> usize { self.step_count }
+///     fn increment_step_count(&mut self) { self.step_count += 1; }
+///     fn batch_size(&self) -> usize { 512 }
+///     fn target_update_freq(&self) -> usize { 1000 }
+///     fn learning_rate(&self) -> f32 { 0.001 }
+///     fn gamma(&self) -> f32 { 0.99 }
+/// }
+/// ```
+pub trait GpuTrainable<B: AutodiffBackend> {
+    /// Get mutable reference to the CPU replay buffer.
+    fn buffer_mut(&mut self) -> &mut CpuRingBuffer;
+
+    /// Get immutable reference to the CPU replay buffer.
+    fn buffer(&self) -> &CpuRingBuffer;
+
+    /// Get mutable reference to the GPU replay buffer (deprecated).
+    #[deprecated(since = "0.2.0", note = "Use buffer_mut() instead")]
+    fn gpu_buffer_mut(&mut self) -> &mut TensorRingBuffer<B> {
+        unimplemented!("Use buffer_mut() instead")
+    }
+
+    /// Get immutable reference to the GPU replay buffer (deprecated).
+    #[deprecated(since = "0.2.0", note = "Use buffer() instead")]
+    fn gpu_buffer(&self) -> &TensorRingBuffer<B> {
+        unimplemented!("Use buffer() instead")
+    }
+
+    /// Perform a GPU-native training step with warmup support.
+    ///
+    /// # Double DQN Implementation Pattern (from Metis reference)
+    ///
+    /// This method should implement the complete Double DQN training pipeline:
+    ///
+    /// ```ignore
+    /// use burnme_rly::buffer::{CpuRingBuffer, TensorTransitionBatch};
+    /// use burn::tensor::{backend::AutodiffBackend, Tensor, Int};
+    ///
+    /// impl<B: AutodiffBackend> MyPolicy<B> {
+    ///     fn train_step_gpu_native(&mut self, _steps: usize) -> Option<f32> {
+    ///         let batch_size = self.effective_batch_size();
+    ///         
+    ///         // 1. Sample from buffer (CPU → GPU conversion)
+    ///         let transitions = self.buffer().sample(batch_size)?;
+    ///         let batch = TensorTransitionBatch::<B>::from_transitions(
+    ///             &transitions, self.state_dim(), &self.device()
+    ///         );
+    ///         
+    ///         // 2. Forward pass: current Q-values for all actions
+    ///         //    Model output: \[batch_size, action_dim\]
+    ///         let q_values = self.model().forward(batch.states);
+    ///         
+    ///         // 3. Gather Q-values for taken actions using gather()
+    ///         //    actions: \[batch_size, 1\], q_values: \[batch_size, action_dim\]
+    ///         //    current_q: \[batch_size, 1\]
+    ///         let current_q = q_values.gather(1, batch.actions);
+    ///         
+    ///         // 4. Double DQN: Policy network selects actions for next states
+    ///         //    best_actions: \[batch_size, 1\]
+    ///         let next_q_policy = self.model().forward(batch.next_states);
+    ///         let best_actions = next_q_policy.argmax(1);
+    ///         
+    ///         // 5. Target network evaluates selected actions
+    ///         //    max_next_q: \[batch_size, 1\]
+    ///         let next_q_target = self.target_model().forward(batch.next_states);
+    ///         let max_next_q = next_q_target.gather(1, best_actions);
+    ///         
+    ///         // 6. Compute target: r + γ * max_a' Q_target(s', a') * (1 - done)
+    ///         //    rewards: \[batch_size, 1\], dones: \[batch_size, 1\]
+    ///         let gamma = self.gamma();
+    ///         let target_q = batch.rewards
+    ///             + Tensor::full([1], gamma, &self.device())
+    ///                 * max_next_q
+    ///                 * (Tensor::ones_like(&batch.dones) - batch.dones);
+    ///         
+    ///         // 7. MSE loss: (current_q - target_q.detach())^2.mean()
+    ///         let diff = current_q - target_q.detach();
+    ///         let squared = diff.powf(Tensor::full([1], 2.0_f32, &self.device()));
+    ///         let loss = squared.mean();
+    ///         
+    ///         // 8. Backward pass and optimizer step
+    ///         let grads = loss.backward();
+    ///         self.optimizer().step(&mut self.model(), grads);
+    ///         
+    ///         // 9. Return loss value for logging
+    ///         Some(loss.into_data().convert::<f32>().as_slice().unwrap()[0])
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Arguments
+    /// * `steps_since_last_train` - Number of steps since last training
+    ///
+    /// # Returns
+    /// * `Some(loss)` if training occurred
+    /// * `None` if training was skipped (e.g., during warmup, insufficient samples)
+    fn train_step_gpu_native(&mut self, steps_since_last_train: usize) -> Option<f32>;
+
+    /// Get the device for tensor operations.
+    fn device(&self) -> &B::Device;
+
+    /// Get state dimension (needed for buffer → tensor conversion).
+    fn state_dim(&self) -> usize;
+
+    /// Get current buffer length (for warmup checking).
+    fn buffer_len(&self) -> usize;
+
+    /// Get warmup batch size.
+    fn warmup_batch_size(&self) -> usize;
+
+    /// Check if warmup phase is complete.
+    fn is_warmup_complete(&self) -> bool;
+
+    /// Mark warmup as complete.
+    fn set_warmup_complete(&mut self, complete: bool);
+
+    /// Get current epsilon (exploration rate).
+    fn epsilon(&self) -> f32;
+
+    /// Get current training step count.
+    fn step_count(&self) -> usize;
+
+    /// Increment step count after training.
+    fn increment_step_count(&mut self);
+
+    /// Get full batch size for training.
+    fn batch_size(&self) -> usize;
+
+    /// Get target network update frequency.
+    fn target_update_freq(&self) -> usize;
+
+    /// Get learning rate.
+    fn learning_rate(&self) -> f32;
+
+    /// Get discount factor (gamma).
+    fn gamma(&self) -> f32;
+
+    /// Decay exploration parameters (e.g., epsilon).
+    /// Called after each training step.
+    fn decay_exploration(&mut self);
+
+    /// Update target network weights from policy network.
+    /// Called periodically based on `target_update_freq()`.
+    fn update_target_network(&mut self);
+
+    /// Save model checkpoint to path.
+    ///
+    /// # Arguments
+    /// * `path` - Path to save the checkpoint
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(...)` on failure
+    fn save_checkpoint(&self, path: &str) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Load model checkpoint from path.
+    ///
+    /// # Arguments
+    /// * `path` - Path to load the checkpoint from
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(...)` on failure
+    fn load_checkpoint(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+/// Helper methods for GpuTrainable (default implementations)
+pub trait GpuTrainableExt<B: AutodiffBackend>: GpuTrainable<B> {
+    /// Get effective batch size based on warmup state.
+    ///
+    /// During warmup: uses warmup_batch_size
+    /// After warmup: uses full batch_size
+    fn effective_batch_size(&mut self) -> usize {
+        if self.is_warmup_complete() {
+            return self.batch_size();
+        }
+
+        let effective = self.warmup_batch_size().min(self.batch_size());
+
+        // Check if we should complete warmup
+        let buffer_len: usize = self.buffer_len();
+        if buffer_len >= self.batch_size() {
+            self.set_warmup_complete(true);
+        }
+
+        effective
+    }
+}
+
+// Blanket implementation
+impl<B: AutodiffBackend, T: GpuTrainable<B>> GpuTrainableExt<B> for T {}
+
+/// Trait for agents that can select actions in batches.
+///
+/// This enables single forward pass for all environments (GPU-efficient).
+pub trait BatchedActionSelector<B: AutodiffBackend> {
+    /// Select actions for all environments using a single forward pass.
+    ///
+    /// # Arguments
+    /// * `observations` - Batch of observations (one per environment)
+    /// * `device` - GPU device for tensor operations
+    /// * `action_dim` - Number of possible actions
+    /// * `epsilon` - Exploration rate (for epsilon-greedy)
+    ///
+    /// # Returns
+    /// Vector of selected actions (one per environment)
+    fn select_actions_batched(
+        &self,
+        observations: &[Vec<f64>],
+        device: &B::Device,
+        action_dim: usize,
+        epsilon: f32,
+    ) -> Vec<usize>;
+}
+
+/// Trait for vectorized environments (multiple environments in parallel).
+///
+/// This trait abstracts the VecEnv pattern from Metis.
+pub trait VecEnvironment {
+    /// Get number of parallel environments.
+    fn num_envs(&self) -> usize;
+
+    /// Get action space (number of discrete actions).
+    fn action_space(&self) -> &DiscreteSpace;
+
+    /// Get observation dimension.
+    fn observation_dim(&self) -> usize;
+
+    /// Reset all environments.
+    ///
+    /// # Returns
+    /// Initial observations for all environments
+    fn reset_all(&mut self) -> Result<Vec<Vec<f64>>, Box<dyn Error>>;
+
+    /// Step all environments (sequential).
+    ///
+    /// # Arguments
+    /// * `actions` - Action for each environment
+    fn step_all(&mut self, actions: Vec<usize>) -> Result<Vec<StepResult>, Box<dyn Error>>;
+
+    /// Step all environments (parallel, if feature enabled).
+    ///
+    /// # Arguments
+    /// * `actions` - Action for each environment
+    #[cfg(feature = "parallel")]
+    fn step_all_parallel(&mut self, actions: Vec<usize>)
+        -> Result<Vec<StepResult>, Box<dyn Error>>;
+
+    /// Reset environments that are done.
+    ///
+    /// # Arguments
+    /// * `results` - Step results indicating which envs are done
+    ///
+    /// # Returns
+    /// New observations for reset environments
+    fn reset_done_environments(
+        &mut self,
+        results: &[StepResult],
+    ) -> Result<Vec<Vec<f64>>, Box<dyn Error>>;
+
+    /// Get current observations after stepping.
+    ///
+    /// Combines step results and reset observations.
+    fn get_current_observations(
+        &self,
+        results: &[StepResult],
+        reset_obs: &[Vec<f64>],
+    ) -> Result<Vec<Vec<f64>>, Box<dyn Error>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::CpuRingBuffer;
+    use burn::backend::Autodiff;
+    use burn::backend::NdArray;
+    use burn::tensor::backend::AutodiffBackend;
+
+    // Type alias for test backend
+    type TestBackend = Autodiff<NdArray>;
+
+    // Mock implementations for testing
+    struct MockAgent<B: AutodiffBackend> {
+        warmup_complete: bool,
+        buffer: CpuRingBuffer,
+        state_dim: usize,
+        device: B::Device,
+        _phantom: std::marker::PhantomData<B>,
+    }
+
+    impl<B: AutodiffBackend> MockAgent<B> {
+        fn new() -> Self {
+            Self {
+                warmup_complete: false,
+                buffer: CpuRingBuffer::new(1000),
+                state_dim: 4,
+                device: Default::default(),
+                _phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<B: AutodiffBackend> GpuTrainable<B> for MockAgent<B> {
+        fn buffer_mut(&mut self) -> &mut CpuRingBuffer {
+            &mut self.buffer
+        }
+
+        fn buffer(&self) -> &CpuRingBuffer {
+            &self.buffer
+        }
+
+        fn train_step_gpu_native(&mut self, _: usize) -> Option<f32> {
+            None
+        }
+
+        fn warmup_batch_size(&self) -> usize {
+            256
+        }
+
+        fn is_warmup_complete(&self) -> bool {
+            self.warmup_complete
+        }
+
+        fn set_warmup_complete(&mut self, complete: bool) {
+            self.warmup_complete = complete;
+        }
+
+        fn epsilon(&self) -> f32 {
+            1.0
+        }
+
+        fn step_count(&self) -> usize {
+            0
+        }
+
+        fn increment_step_count(&mut self) {}
+
+        fn batch_size(&self) -> usize {
+            512
+        }
+
+        fn target_update_freq(&self) -> usize {
+            1000
+        }
+
+        fn learning_rate(&self) -> f32 {
+            0.001
+        }
+
+        fn gamma(&self) -> f32 {
+            0.99
+        }
+
+        fn decay_exploration(&mut self) {
+            // No-op for mock
+        }
+
+        fn update_target_network(&mut self) {
+            // No-op for mock
+        }
+
+        fn device(&self) -> &B::Device {
+            &self.device
+        }
+
+        fn state_dim(&self) -> usize {
+            self.state_dim
+        }
+
+        fn buffer_len(&self) -> usize {
+            self.buffer.len()
+        }
+
+        fn save_checkpoint(&self, _path: &str) -> Result<(), Box<dyn std::error::Error>> {
+            // Mock implementation: just succeed
+            Ok(())
+        }
+
+        fn load_checkpoint(&mut self, _path: &str) -> Result<(), Box<dyn std::error::Error>> {
+            // Mock implementation: just succeed
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_gpu_trainable_ext_warmup() {
+        let mut agent = MockAgent::<TestBackend>::new();
+        // Test effective_batch_size during warmup
+        assert_eq!(agent.effective_batch_size(), 256); // Warmup batch size
+    }
+
+    #[test]
+    fn test_gpu_trainable_ext_post_warmup() {
+        let mut agent = MockAgent::<TestBackend>::new();
+        agent.set_warmup_complete(true);
+        // Test effective_batch_size after warmup
+        assert_eq!(agent.effective_batch_size(), 512); // Full batch size
+    }
+
+    #[test]
+    fn test_mock_agent_properties() {
+        let agent = MockAgent::<TestBackend>::new();
+        assert_eq!(agent.warmup_batch_size(), 256);
+        assert_eq!(agent.batch_size(), 512);
+        assert_eq!(agent.target_update_freq(), 1000);
+        assert!((agent.learning_rate() - 0.001).abs() < f32::EPSILON);
+        assert!((agent.gamma() - 0.99).abs() < f32::EPSILON);
+    }
+}

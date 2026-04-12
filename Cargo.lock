@@ -951,8 +951,10 @@ name = "burnme-rly"
 version = "0.1.0"
 dependencies = [
  "burn",
- "rand 0.8.5",
- "thiserror 2.0.18",
+ "log",
+ "rand 0.10.0",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

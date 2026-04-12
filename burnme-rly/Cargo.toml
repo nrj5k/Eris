@@ -1,0 +1,24 @@
+[package]
+name = "burnme-rly"
+version = "0.1.0"
+edition = "2021"
+description = "Optimized GPU training pipeline for Burn-based reinforcement learning"
+license = "GPL-3.0"
+
+[dependencies]
+burn = { version = "0.20", default-features = false }
+log = "0.4"
+rand = "0.10"
+# thiserror removed - not used
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[features]
+default = ["wgpu", "cpu"]
+cuda = ["burn/cuda", "burn/autodiff", "burn/train"]
+rocm = ["burn/rocm", "burn/autodiff", "burn/train"]
+wgpu = ["burn/wgpu", "burn/autodiff", "burn/train"]
+cpu = ["burn/ndarray", "burn/train"]
+
+[dev-dependencies]
+burn = { version = "0.20", features = ["ndarray", "autodiff"] }

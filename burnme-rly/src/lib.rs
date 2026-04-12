@@ -1,0 +1,68 @@
+//! # burnme-rly
+//!
+//! Optimized GPU training pipeline for Burn-based reinforcement learning.
+//!
+//! ## Features
+//!
+//! - **GPU-native**: Zero-allocation experience replay with TensorRingBuffer
+//! - **Backend-agnostic**: Works with CUDA, WGPU, CPU (NdArray)
+//! - **Vectorized environments**: Train multiple environments in parallel
+//! - **Warmup handling**: Automatic batch size ramp-up for stable training
+//! - **Metis-based**: Extracted from proven high-performance training patterns
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use burnme_rly::{
+//!     GpuTrainingCoordinator, TrainingConfig, GpuTrainable,
+//!     BatchedActionSelector, VecEnvironment
+//! };
+//! use burn::backend::Cuda;
+//!
+//! // Implement traits for your policy
+//! impl<B: AutodiffBackend> GpuTrainable<B> for MyPolicy<B> { ... }
+//! impl<B: AutodiffBackend> BatchedActionSelector<B> for MyPolicy<B> { ... }
+//!
+//! // Configure and run training
+//! let config = TrainingConfig::new(1000, 500, 512)
+//!     .with_warmup_batch_size(256);
+//! let coordinator = GpuTrainingCoordinator::new(config);
+//! let metrics = coordinator.run_training(
+//!     &mut agent, &mut env, &device, "checkpoints"
+//! )?;
+//!
+//! println!("Training complete! Avg reward: {}", metrics.avg_reward);
+//! ```
+
+pub mod buffer;
+pub mod checkpoint;
+pub mod coordinator;
+pub mod diagnostics;
+pub mod env;
+pub mod loss;
+pub mod models;
+pub mod space;
+pub mod trainers;
+pub mod traits;
+pub mod warmup;
+
+// Re-export main types for convenient use
+// TensorRingBuffer is deprecated but re-exported for backward compatibility
+#[allow(deprecated)]
+pub use buffer::{
+    CpuRingBuffer, GpuRingBuffer, GpuTransitionBatch, TensorRingBuffer, TensorTransitionBatch,
+    Transition,
+};
+pub use checkpoint::{load_checkpoint, save_checkpoint, CheckpointMetadata};
+pub use coordinator::{GpuTrainingCoordinator, TrainingConfig, TrainingMetrics};
+pub use diagnostics::{log_backend_info, SimpleTimer};
+pub use env::{Info, StepResult};
+pub use loss::{compute_double_dqn_loss, compute_td_target};
+pub use models::CombinedModel;
+pub use space::DiscreteSpace;
+pub use trainers::{DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig};
+pub use traits::{BatchedActionSelector, GpuTrainable, GpuTrainableExt, VecEnvironment};
+pub use warmup::{should_train, train_step_with_warmup};
+
+// Version info
+pub const VERSION: &str = "0.1.0";
