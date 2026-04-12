@@ -53,7 +53,7 @@ fn test_env_only(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Config loaded");
 
     println!("\nCreating environment...");
-    let env = IOBufferEnv::new(config_path, trace_path, args.max_steps)?;
+    let env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)?;
     println!("✓ Environment created");
 
     println!("\nEnvironment info:");

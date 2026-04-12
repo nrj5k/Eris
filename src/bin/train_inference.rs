@@ -78,7 +78,7 @@ fn run_test(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let config = FullTrainingConfig::from_file(config_path)?;
 
     // Create environment
-    let env = IOBufferEnv::new(config_path, trace_path, args.max_steps)?;
+    let env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)?;
 
     // Get dimensions
     let state_dim = env.observation_space().dim();

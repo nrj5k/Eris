@@ -47,12 +47,16 @@ impl VecEnv {
         for i in 0..num_envs {
             // Use shared trace data - no CSV reload!
             // Each environment gets independent position tracking
-            let env = IOBufferEnv::with_shared_trace(
+            let mut env = IOBufferEnv::with_shared_trace(
                 config_path,
                 Arc::clone(&shared_trace_data),
                 max_steps,
+                None,
+                None,
             )
             .map_err(|e| format!("Failed to create env {}: {}", i, e))?;
+            // FIX: Each env gets unique seed to avoid correlation
+            env.seed(42 + i as u64);
             envs.push(env);
         }
 

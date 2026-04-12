@@ -855,7 +855,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
     let trace_path = Path::new("recorder-csv/NWChem-64_combined.csv");
     #[cfg(debug_assertions)]
     eprintln!("DEBUG: Creating environment");
-    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps)
+    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)
         .map_err(|e| format!("Failed to create environment: {}", e))?;
     #[cfg(debug_assertions)]
     eprintln!("DEBUG: Environment created");
@@ -1114,7 +1114,7 @@ fn run_cacheus_training(args: &Args) -> Result<(), String> {
     // Create environment
     let trace_path = Path::new("recorder-csv/NWChem-64_combined.csv");
     let config_path = &args.config;
-    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps)
+    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)
         .map_err(|e| format!("Failed to create env: {}", e))?;
 
     // Training loop (online learning)
@@ -1576,7 +1576,7 @@ fn run_bandit_training<B: burn::tensor::backend::AutodiffBackend>(
     // Create environment
     let trace_path = Path::new("recorder-csv/NWChem-64_combined.csv");
     let config_path = &args.config;
-    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps)
+    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)
         .map_err(|e| format!("Failed to create env: {}", e))?;
 
     // Get dimensions from environment

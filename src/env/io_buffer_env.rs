@@ -49,7 +49,8 @@ pub struct IOBufferEnv {
     current_time_ms: u64,
     /// Current blob to process
     current_blob: Option<BlobData>,
-    /// Hotness scoring configuration
+    /// Hotness scoring configuration (reserved for future use)
+    #[allow(dead_code)]
     hotness_config: HotnessConfig,
     /// Random number generator for the environment
     random: rand_pcg::Pcg64,
@@ -66,6 +67,8 @@ impl IOBufferEnv {
     /// * `config_path` - Path to tier configuration TOML file
     /// * `trace_path` - Path to CSV trace file
     /// * `max_steps` - Maximum steps per episode
+    /// * `max_blob_size` - Optional max blob size for normalization (default: 2_000_000.0)
+    /// * `max_frequency` - Optional max access frequency for normalization (default: 100)
     ///
     /// # Errors
     /// Returns error if config or trace files cannot be loaded.
@@ -73,6 +76,8 @@ impl IOBufferEnv {
         config_path: &std::path::Path,
         trace_path: &std::path::Path,
         max_steps: usize,
+        max_blob_size: Option<f64>,
+        max_frequency: Option<u32>,
     ) -> Result<Self> {
         use crate::config::Config;
         use rand::SeedableRng;
@@ -92,9 +97,9 @@ impl IOBufferEnv {
         let tier_configs = config.tier.clone();
         let buffer = BufferEnv::new(config.tier);
 
-        // Estimate max blob size from first few records (for normalization)
-        let max_blob_size = 2_000_000.0; // Default max 2MB
-        let max_frequency = 100; // Default max frequency
+        // Use provided values or defaults for normalization
+        let max_blob_size = max_blob_size.unwrap_or(2_000_000.0);
+        let max_frequency = max_frequency.unwrap_or(100);
 
         Ok(Self {
             tier_configs,
@@ -122,6 +127,8 @@ impl IOBufferEnv {
     /// * `config_path` - Path to tier configuration TOML file
     /// * `trace_data` - Shared trace data (loaded once, shared across envs)
     /// * `max_steps` - Maximum steps per episode
+    /// * `max_blob_size` - Optional max blob size for normalization (default: 2_000_000.0)
+    /// * `max_frequency` - Optional max access frequency for normalization (default: 100)
     ///
     /// # Errors
     /// Returns error if config file cannot be loaded.
@@ -129,6 +136,8 @@ impl IOBufferEnv {
         config_path: &std::path::Path,
         trace_data: Arc<TraceData>,
         max_steps: usize,
+        max_blob_size: Option<f64>,
+        max_frequency: Option<u32>,
     ) -> Result<Self> {
         use crate::config::Config;
         use rand::SeedableRng;
@@ -140,9 +149,9 @@ impl IOBufferEnv {
         // Create a new TraceReader with shared data but independent position tracking
         let trace = TraceReader::from_shared_data(trace_data);
 
-        // Estimate max blob size from first few records (for normalization)
-        let max_blob_size = 2_000_000.0; // Default max 2MB
-        let max_frequency = 100; // Default max frequency
+        // Use provided values or defaults for normalization
+        let max_blob_size = max_blob_size.unwrap_or(2_000_000.0);
+        let max_frequency = max_frequency.unwrap_or(100);
 
         Ok(Self {
             tier_configs,
@@ -211,7 +220,7 @@ impl IOBufferEnv {
     /// Handle write operation to a specific tier.
     ///
     /// Attempts to write blob to the specified tier. If tier is full,
-    /// attempts cascading demotion to lower tiers.
+    /// evicts coldest blob from TARGET tier with cascading demotion.
     fn handle_write(&mut self, tier_idx: usize, blob_id: &str, size: f64) -> Result<f64> {
         // Validate tier index
         if tier_idx >= self.buffer.num_tiers() {
@@ -221,58 +230,100 @@ impl IOBufferEnv {
             });
         }
 
-        // Attempt to write to specified tier
+        // Fast path: try direct write
         if let Some(tier) = self.buffer.get_tier(tier_idx) {
             if tier.write(blob_id, size).is_ok() {
-                return Ok(0.0); // Success, no latency penalty for write
+                let latency = self.tier_configs[tier_idx].access_latency as f64;
+                return Ok(calculate_latency_reward(latency));
             }
         }
 
-        // Tier is full, attempt cascading demotion
-        let mut current_tier_idx = tier_idx;
-        while current_tier_idx < self.buffer.num_tiers() - 1 {
-            current_tier_idx += 1;
+        // Slow path: evict from TARGET tier with cascading demotion
+        let max_attempts = self.buffer.num_tiers() * 2;
 
-            // Find lowest hotness item in current tier for eviction
-            if let Some((evict_id, evict_size)) = self.find_eviction_candidate(current_tier_idx)? {
-                // Remove from current tier
-                if let Some(tier) = self.buffer.get_tier(current_tier_idx) {
-                    tier.remove(&evict_id);
-                }
+        for _ in 0..max_attempts {
+            // Find coldest blob in TARGET tier (not tier_idx+1)
+            let candidate = self.find_eviction_candidate(tier_idx)?;
 
-                // Write to next tier down (if not last tier)
-                if current_tier_idx < self.buffer.num_tiers() - 1 {
-                    if let Some(next_tier) = self.buffer.get_tier(current_tier_idx + 1) {
-                        let _ = next_tier.write(&evict_id, evict_size);
+            match candidate {
+                Some((evict_id, evict_size)) => {
+                    // Remove from target tier
+                    let removed = self
+                        .buffer
+                        .get_tier(tier_idx)
+                        .map_or(false, |t| t.remove(&evict_id));
+
+                    if !removed {
+                        break;
                     }
-                }
 
-                // Retry write to target tier
-                if let Some(target_tier) = self.buffer.get_tier(tier_idx) {
-                    if target_tier.write(blob_id, size).is_ok() {
-                        return Ok(0.0);
+                    // Try to demote evicted blob to lower tiers
+                    let demoted = self.cascade_demote(&evict_id, evict_size, tier_idx + 1);
+
+                    if !demoted {
+                        // Demotion failed - RESTORE to avoid data loss
+                        if let Some(tier) = self.buffer.get_tier(tier_idx) {
+                            let _ = tier.write(&evict_id, evict_size);
+                        }
+                        break;
                     }
+
+                    // Retry original write
+                    if let Some(tier) = self.buffer.get_tier(tier_idx) {
+                        if tier.write(blob_id, size).is_ok() {
+                            let latency = self.tier_configs[tier_idx].access_latency as f64;
+                            return Ok(calculate_latency_reward(latency));
+                        }
+                    }
+                    // Still full - loop to evict another blob
                 }
-            } else {
-                break;
+                None => break, // No evictable blobs
             }
         }
 
-        // All tiers full, write to last resort (Tapes)
-        let last_tier = self.buffer.num_tiers() - 1;
-        if let Some(tape) = self.buffer.get_tier(last_tier) {
-            tape.write(blob_id, size)?;
-            // High latency cost for tape storage
-            return Ok(0.0);
+        // Fallback: write to last tier with penalty
+        let last = self.buffer.num_tiers() - 1;
+        if let Some(tape) = self.buffer.get_tier(last) {
+            if tape.write(blob_id, size).is_ok() {
+                let latency = self.tier_configs[last].access_latency as f64;
+                return Ok(calculate_latency_reward(latency));
+            }
         }
 
-        // Write failed
         Ok(-10000.0)
     }
 
-    /// Handle read operation from a specific tier.
+    /// Cascade demote a blob starting from start_tier downward.
     ///
-    /// Searches all tiers for the blob and returns latency-based penalty.
+    /// Attempts to place the blob in successive tiers until successful.
+    /// Returns true if placed, false if all tiers are full.
+    fn cascade_demote(&mut self, blob_id: &str, size: f64, start_tier: usize) -> bool {
+        let mut tier_idx = start_tier;
+
+        while tier_idx < self.buffer.num_tiers() {
+            if let Some(tier) = self.buffer.get_tier(tier_idx) {
+                if tier.write(blob_id, size).is_ok() {
+                    return true;
+                }
+            }
+            tier_idx += 1;
+        }
+
+        false // Could not place anywhere
+    }
+
+    /// Handle read operation with smart cache lookup.
+    ///
+    /// The agent specifies a preferred tier via `_tier_idx`, but the system
+    /// searches ALL tiers from fastest to slowest to find the blob. This
+    /// mimics real storage systems where the controller knows where data lives.
+    ///
+    /// Reward is based on the ACTUAL tier where the blob was found, not the
+    /// requested tier. This encourages the agent to place hot data in fast tiers
+    /// since it will be found there regardless of which tier the agent queries.
+    ///
+    /// # Returns
+    /// Normalized reward [0.0, 1.0] based on tier latency, or MISS_PENALTY if not found.
     fn handle_read(&mut self, _tier_idx: usize, blob_id: &str, _size: f64) -> Result<f64> {
         // Search all tiers for the blob
         for i in 0..self.buffer.num_tiers() {
@@ -310,12 +361,12 @@ impl IOBufferEnv {
             let recency = self.tracker.get_recency(blob_id, self.current_time_ms);
             let frequency = self.tracker.get_frequency(blob_id);
 
-            // Hotness score: lower recency + higher frequency = higher score
+            // Hotness score: higher frequency + lower recency = higher score
             // We want to evict low-score items
             let score = if recency.is_finite() {
-                recency / (1.0 + frequency as f32)
+                (frequency as f32 + 1.0) / (recency + 1.0)
             } else {
-                f32::INFINITY // Never accessed, evict immediately
+                0.0 // Never accessed = coldest = evict immediately
             };
 
             if score < lowest_score {
@@ -502,7 +553,7 @@ mod tests {
             return None;
         }
 
-        IOBufferEnv::new(config_path, trace_path, 100).ok()
+        IOBufferEnv::new(config_path, trace_path, 100, None, None).ok()
     }
 
     #[test]
@@ -694,5 +745,91 @@ mod tests {
         let negative_latency = -10.0;
         let negative_reward = calculate_latency_reward(negative_latency);
         assert_eq!(negative_reward, 1.0, "Negative latency should clamp to 1.0");
+    }
+
+    // ============================================================
+    // Hotness Score Formula Tests
+    // Formula: (frequency + 1.0) / (recency + 1.0)
+    // ============================================================
+
+    #[test]
+    fn test_hotness_score_hot_data() {
+        // High frequency (10), low recency (1.0) = HOT = high score
+        // Score = (10 + 1) / (1.0 + 1) = 11 / 2 = 5.5
+        let frequency = 10;
+        let recency = 1.0f32;
+        let score = (frequency as f32 + 1.0) / (recency + 1.0);
+
+        assert!(
+            score > 1.0,
+            "Hot data should have score > 1.0, got {}",
+            score
+        );
+        assert!(
+            score > 5.0,
+            "High freq + low recency should score very high"
+        );
+    }
+
+    #[test]
+    fn test_hotness_score_cold_data() {
+        // Low frequency (1), high recency (1000.0) = COLD = low score
+        // Score = (1 + 1) / (1000.0 + 1) = 2 / 1001 ≈ 0.002
+        let frequency = 1;
+        let recency = 1000.0f32;
+        let score = (frequency as f32 + 1.0) / (recency + 1.0);
+
+        assert!(
+            score < 1.0,
+            "Cold data should have score < 1.0, got {}",
+            score
+        );
+        assert!(
+            score < 0.01,
+            "Low freq + high recency should score very low"
+        );
+    }
+
+    #[test]
+    fn test_hotness_score_never_accessed() {
+        // Never accessed (recency = INFINITY) = COLDEST = score 0.0
+        let score = 0.0f32; // Never accessed returns 0.0
+
+        assert_eq!(score, 0.0, "Never accessed should have score 0.0");
+    }
+
+    #[test]
+    fn test_hotness_score_just_accessed() {
+        // Just accessed (recency ≈ 0) = HOTTEST = very high score
+        let frequency = 5;
+        let recency = 0.001f32; // Just accessed
+        let score = (frequency as f32 + 1.0) / (recency + 1.0);
+
+        assert!(
+            score > 5.0,
+            "Just-accessed hot data should have very high score"
+        );
+        assert!(
+            score < 6.0,
+            "Score should be approximately (5+1)/(0.001+1) ≈ 5.99"
+        );
+    }
+
+    #[test]
+    fn test_hotness_score_comparison() {
+        // Verify hot data scores higher than cold data
+        let hot_score = (10.0 + 1.0) / (1.0 + 1.0); // freq=10, recency=1
+        let cold_score = (1.0 + 1.0) / (1000.0 + 1.0); // freq=1, recency=1000
+
+        assert!(
+            hot_score > cold_score,
+            "Hot data ({}) should score higher than cold data ({})",
+            hot_score,
+            cold_score
+        );
+        assert!(
+            hot_score > 100.0 * cold_score,
+            "Hot should be MUCH higher than cold"
+        );
     }
 }
