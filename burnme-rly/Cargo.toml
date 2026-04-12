@@ -14,7 +14,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [features]
-default = ["wgpu", "cpu"]
+default = ["wgpu"]
 cuda = ["burn/cuda", "burn/autodiff", "burn/train"]
 rocm = ["burn/rocm", "burn/autodiff", "burn/train"]
 wgpu = ["burn/wgpu", "burn/autodiff", "burn/train"]
