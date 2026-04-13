@@ -7,7 +7,6 @@ use super::policy::*;
 use super::tensor_utils::{batch_to_tensors, state_to_tensor};
 use crate::config::CombinedBanditDQNConfig;
 use crate::models::CombinedModel;
-use crate::training::ring_buffer::RingBuffer;
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor};
 use std::error::Error;
@@ -19,8 +18,6 @@ pub struct MetisPolicy<B: AutodiffBackend> {
     model: CombinedModel<B>,
     /// Target network (frozen copy)
     target_model: CombinedModel<B>,
-    /// Experience replay buffer
-    buffer: RingBuffer,
     /// Exploration strategy
     explorer: Box<dyn ExplorationStrategy<B>>,
     /// Configuration
@@ -54,8 +51,6 @@ pub struct MetisConfig {
     pub target_update_freq: usize,
     /// Batch size
     pub batch_size: usize,
-    /// Replay buffer capacity
-    pub buffer_capacity: usize,
     /// Exploration strategy configuration
     pub exploration: ExplorationConfig,
 }
@@ -73,7 +68,6 @@ impl Default for MetisConfig {
             epsilon_decay: 0.995,
             target_update_freq: 1000,
             batch_size: 2048, // Optimized for GPU utilization (multiple of 32 for warp alignment)
-            buffer_capacity: 10_000,
             exploration: ExplorationConfig::EpsilonGreedy {
                 epsilon_start: 1.0,
                 epsilon_end: 0.01,
@@ -100,7 +94,6 @@ impl<B: AutodiffBackend> MetisPolicy<B> {
     ) -> Self {
         let model = model_config.init(&device);
         let target_model = model_config.init(&device);
-        let buffer = RingBuffer::new(config.buffer_capacity);
 
         // Build exploration strategy from config
         let explorer = config.exploration.build(config.action_dim);
@@ -108,7 +101,6 @@ impl<B: AutodiffBackend> MetisPolicy<B> {
         Self {
             model,
             target_model,
-            buffer,
             explorer,
             config,
             device,

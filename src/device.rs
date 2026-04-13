@@ -72,7 +72,7 @@ pub fn create_device(backend: &str) -> Box<dyn std::any::Any> {
         #[cfg(feature = "wgpu")]
         "gpu" | "wgpu" => {
             println!("Creating Wgpu GPU device...");
-            use burn::backend::Wgpu;
+
             let device = burn::backend::wgpu::WgpuDevice::DiscreteGpu(0);
             Box::new(device)
         }

@@ -190,7 +190,8 @@ pub struct CatcherPolicy<B: AutodiffBackend> {
     /// Discount factor for future rewards
     gamma: f32,
     /// Soft update coefficient for target networks (τ)
-    tau: f32,
+    #[allow(dead_code)] // Used in tests; will be used by soft update when implemented
+    pub tau: f32,
     /// Batch size for training
     batch_size: usize,
     /// Learning rate for actor

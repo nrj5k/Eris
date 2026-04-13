@@ -8,12 +8,8 @@ use crate::tier::BufferEnv;
 use crate::trace::{BlobData, TraceData, TraceReader};
 use std::sync::Arc;
 
-/// Maximum number of tiers in the hierarchy
-pub const MAX_TIERS: usize = 5;
-
 /// Worst case latency (tape) for normalization
 const WORST_LATENCY: f64 = 1_000_000.0; // 1,000,000 ms
-const BEST_LATENCY: f64 = 0.01; // 0.01 ms
 const MISS_PENALTY: f64 = -0.5; // Penalty for cache miss
 
 /// Calculate normalized reward based on relative savings.
@@ -544,6 +540,9 @@ impl Environment for IOBufferEnv {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// Maximum number of tiers in the hierarchy (test-only constant)
+    const MAX_TIERS: usize = 5;
 
     fn create_test_env() -> Option<IOBufferEnv> {
         let config_path = Path::new("config/tiers.toml");

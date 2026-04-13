@@ -93,6 +93,7 @@ impl DQNConfig {
     ///
     /// # Returns
     /// Initialized QNetwork with random weights
+    #[allow(deprecated)]
     pub fn init<B: burn::prelude::Backend>(
         &self,
         device: &B::Device,

@@ -93,6 +93,7 @@ impl BanditConfig {
     ///
     /// # Returns
     /// Initialized ContextualBandit with random weights
+    #[allow(deprecated)]
     pub fn init<B: burn::prelude::Backend>(
         &self,
         device: &B::Device,

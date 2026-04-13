@@ -748,6 +748,7 @@ fn run_training_vecenv<B: burn::tensor::backend::AutodiffBackend>(
 /// - Better GPU utilization
 ///
 /// The epsilon-greedy decision is made PER-ENVIRONMENT after getting all Q-values.
+#[allow(dead_code)]
 fn select_actions_batched<B: burn::tensor::backend::AutodiffBackend>(
     agent: &CombinedAgent<B>,
     observations: &[Vec<f64>],
@@ -881,7 +882,6 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
     use eris::env::Environment;
     use eris::env::IOBufferEnv;
     use eris::space::Space;
-    use eris::training::Transition;
     use std::path::Path;
 
     // Create environment

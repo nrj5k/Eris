@@ -172,7 +172,7 @@
 use super::exploration::ExplorationStrategy;
 use super::policy::*;
 use super::td_loss::compute_td_loss;
-use super::tensor_utils::{batch_to_tensors, state_to_tensor, states_to_tensor};
+use super::tensor_utils::{batch_to_tensors, state_to_tensor};
 use crate::config::DQNConfig;
 use crate::models::QNetwork;
 use crate::training::tensor_buffer::TensorTransitionBatch;
@@ -683,7 +683,7 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
 
         // Time the forward pass
         let forward_start = std::time::Instant::now();
-        let q_values = self.q_network.forward(batch.states.clone());
+        let _q_values = self.q_network.forward(batch.states.clone());
         let forward_time = forward_start.elapsed();
         tracing::trace!(
             "[STAGE:CRITICAL] Q-network forward took: {:?}",
@@ -811,6 +811,7 @@ impl<B: AutodiffBackend> crate::training::BatchedActionSelector<B> for DQNPolicy
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policies::tensor_utils::states_to_tensor;
     use burn::backend::{Autodiff, NdArray};
     use burn::prelude::Backend;
 

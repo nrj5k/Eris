@@ -184,13 +184,9 @@ impl<B: Backend> HybridRingBuffer<B> {
         }
 
         // Random indices using rand crate
-        use rand::prelude::IndexedRandom;
+        use rand::prelude::IteratorRandom;
         let mut rng = rand::rng();
-        let indices: Vec<usize> = (0..self.size)
-            .collect::<Vec<_>>()
-            .choose_multiple(&mut rng, batch_size)
-            .cloned()
-            .collect();
+        let indices: Vec<usize> = (0..self.size).sample(&mut rng, batch_size);
 
         // Gather samples from CPU storage
         let mut batch_states = Vec::with_capacity(batch_size * self.state_dim);

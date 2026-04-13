@@ -66,7 +66,7 @@ fn test_env_only(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let trace_path = Path::new(&args.trace);
 
     println!("Loading config...");
-    let config = FullTrainingConfig::from_file(config_path)?;
+    let _config = FullTrainingConfig::from_file(config_path)?;
     println!("✓ Config loaded");
 
     println!("\nCreating environment...");
@@ -86,7 +86,7 @@ fn test_env_only(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     println!("\nTaking 5 random steps...");
     for step in 0..5 {
         let action = step % 10; // Simple deterministic action
-        let (next_obs, reward, done) = env.step(action);
+        let (_next_obs, reward, done) = env.step(action);
         println!(
             "  Step {}: action={}, reward={:.2}, done={}",
             step + 1,

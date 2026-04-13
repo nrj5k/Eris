@@ -73,12 +73,17 @@ impl CombinedModelConfig {
         );
 
         CombinedModel {
+            // TODO: Migrate to eris::config::BanditConfig builder pattern
+            #[allow(deprecated)]
             bandit: ContextualBanditConfig::new(
                 self.state_dim,
                 self.state_dim, // Use state_dim for bandit, not hidden_dim/2
                 self.feature_dim,
             )
             .init(device),
+
+            // TODO: Migrate to eris::config::DQNConfig builder pattern
+            #[allow(deprecated)]
             qnetwork: QNetworkConfig::new(self.feature_dim, self.hidden_dim, self.action_dim)
                 .init(device),
         }

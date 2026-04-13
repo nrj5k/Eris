@@ -473,7 +473,6 @@ impl GpuTrainingCoordinator {
         let mut steps_since_last_train = 0;
         let mut last_checkpoint_episode = 0; // Track last checkpoint to prevent duplicates
         let mut best_reward: f32 = 0.0; // Track best reward for checkpoint metadata
-        let mut last_episode_reward: f32 = 0.0; // Track last episode reward for checkpoint metadata
 
         // Initialize per-environment tracking
         let num_envs = env.num_envs();
@@ -531,7 +530,6 @@ impl GpuTrainingCoordinator {
                 // Episode end handling
                 if result.done {
                     let episode_reward = env_cumulative_rewards[i] as f32;
-                    last_episode_reward = episode_reward;
                     episode_rewards.push(env_cumulative_rewards[i]);
                     best_reward = best_reward.max(episode_reward);
                     env_cumulative_rewards[i] = 0.0;

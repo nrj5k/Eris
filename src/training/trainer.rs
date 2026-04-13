@@ -35,7 +35,7 @@ use tracy_client::span;
 
 use crate::config::CombinedBanditDQNConfig;
 use crate::models::CombinedModel;
-use crate::training::checkpoint::{CheckpointMetadata, CheckpointMetadataExt, DQNCheckpointHelper};
+use crate::training::checkpoint::{CheckpointMetadata, CheckpointMetadataExt};
 use crate::training::replay_buffer::TransitionBatch;
 use crate::training::HybridRingBuffer;
 use crate::training::TensorTransitionBatch;
@@ -782,11 +782,17 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         )
         .with_training_state(self.step_count, episode, self.epsilon, avg_reward);
 
-        DQNCheckpointHelper::save(&self.model, directory, name, episode, &metadata)?;
+        crate::training::checkpoint::save_checkpoint::<B, _>(
+            &self.model,
+            directory,
+            name,
+            episode,
+            &metadata,
+        )?;
 
         // Also save target network (use underscore instead of dot for filename)
         let target_name = format!("{}_target", name);
-        DQNCheckpointHelper::save(
+        crate::training::checkpoint::save_checkpoint::<B, _>(
             &self.target_model,
             directory,
             &target_name,
@@ -827,7 +833,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             .unwrap_or("model");
 
         // Load policy network using Burn's recorder
-        let (model, metadata) = DQNCheckpointHelper::load(
+        let (model, metadata) = crate::training::checkpoint::load_checkpoint::<B, _>(
             directory,
             name,
             0, // Use epoch 0 for single checkpoint
@@ -865,10 +871,13 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
 
         // Load target network (use underscore instead of dot for filename)
         let target_name = format!("{}_target", name);
-        let (target_model, _metadata) =
-            DQNCheckpointHelper::load(directory, &target_name, 0, &device, || {
-                model_config.init(&device)
-            })?;
+        let (target_model, _metadata) = crate::training::checkpoint::load_checkpoint::<B, _>(
+            directory,
+            &target_name,
+            0,
+            &device,
+            || model_config.init(&device),
+        )?;
 
         // Create hybrid buffer with state dimension from model config
         let state_dim = model_config.bandit.input_dim;

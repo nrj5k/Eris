@@ -35,7 +35,6 @@
 //! println!("Policy type: {}", metadata.policy_type);
 //! ```
 
-use serde::Serialize;
 use std::error::Error;
 use std::fs;
 use std::path::Path;

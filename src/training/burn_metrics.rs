@@ -466,7 +466,7 @@ impl Metric for TierMetric {
 
         // Create formatted output with bars
         let mut formatted = String::from("Tiers:\n");
-        for (i, (name, &avg)) in self
+        for (i, (name, &_avg)) in self
             .tier_names
             .iter()
             .zip(self.tier_averages.iter())
