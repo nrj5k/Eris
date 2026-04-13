@@ -17,7 +17,6 @@
 //! Extract episode loop to make this fully generic (Option 3 unification).
 
 use crate::training::tensor_buffer::TensorTransitionBatch;
-use crate::training::HybridRingBuffer;
 use burn::tensor::backend::AutodiffBackend;
 
 /// Trait for policies that support GPU-native training with TensorRingBuffer.
@@ -130,13 +129,15 @@ pub trait GpuTrainable<B: AutodiffBackend> {
 
         if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
             println!(
-                "🔍 train_step_gpu_native #{}: sample_batch(batch_size={}) took {:?}",
+                "[STAGE:DIAG] train_step_gpu_native #{}: sample_batch(batch_size={}) took {:?}",
                 self.step_count(),
                 batch_size,
                 sample_elapsed
             );
             if sample_elapsed.as_millis() > 10 {
-                println!("   ⚠️  SLOW sample_batch (>10ms) - data transfer may be on CPU");
+                println!(
+                    "   [STAGE:WARN]  SLOW sample_batch (>10ms) - data transfer may be on CPU"
+                );
             }
         }
 
@@ -147,7 +148,7 @@ pub trait GpuTrainable<B: AutodiffBackend> {
 
         if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
             println!(
-                "🔍 train_step_gpu_native #{}: train_step_gpu took {:?} (loss={:.4})",
+                "[STAGE:DIAG] train_step_gpu_native #{}: train_step_gpu took {:?} (loss={:.4})",
                 self.step_count(),
                 train_elapsed,
                 loss
@@ -166,7 +167,7 @@ pub trait GpuTrainable<B: AutodiffBackend> {
         let total_elapsed = step_start.elapsed();
         if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
             println!(
-                "🔍 train_step_gpu_native #{}: TOTAL took {:?} (sample={:?}, train={:?})",
+                "[STAGE:DIAG] train_step_gpu_native #{}: TOTAL took {:?} (sample={:?}, train={:?})",
                 self.step_count(),
                 total_elapsed,
                 sample_elapsed,

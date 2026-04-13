@@ -62,7 +62,10 @@ impl TraceReader {
                 }
                 Err(e) => {
                     skipped_rows += 1;
-                    eprintln!("⚠️  Warning: Skipping malformed row {}: {}", row_num, e);
+                    eprintln!(
+                        "[STAGE:WARN]  Warning: Skipping malformed row {}: {}",
+                        row_num, e
+                    );
 
                     // Log first few errors in detail
                     if skipped_rows <= 5 {
@@ -90,7 +93,7 @@ impl TraceReader {
         // Warn if significantly fewer rows than expected
         if loaded_rows < expected_rows.saturating_sub(10) {
             eprintln!(
-                "⚠️  Warning: Expected ~{} rows, but only loaded {}",
+                "[STAGE:WARN]  Warning: Expected ~{} rows, but only loaded {}",
                 expected_rows, loaded_rows
             );
             eprintln!("   ({} rows skipped due to errors)", skipped_rows);
@@ -100,7 +103,7 @@ impl TraceReader {
         if skipped_rows > 0 {
             let percentage = (skipped_rows as f64 / (skipped_rows + loaded_rows) as f64) * 100.0;
             eprintln!(
-                "⚠️  Warning: Skipped {} rows ({:.1}%)",
+                "[STAGE:WARN]  Warning: Skipped {} rows ({:.1}%)",
                 skipped_rows, percentage
             );
         }

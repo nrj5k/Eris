@@ -1,6 +1,6 @@
 //! Manual DQN Training Implementation (Legacy)
 //!
-//! **⚠️ DEPRECATION NOTICE:**
+//! **[STAGE:WARN] DEPRECATION NOTICE:**
 //! The `train_step()` method in this module is deprecated. Use the Burn `TrainStep`
 //! implementation in `burn_trainer.rs` with Burn's training pipeline instead.
 //!
@@ -35,7 +35,7 @@ use tracy_client::span;
 
 use crate::config::CombinedBanditDQNConfig;
 use crate::models::CombinedModel;
-use crate::training::checkpoint::{CheckpointMetadata, DQNCheckpointHelper};
+use crate::training::checkpoint::{CheckpointMetadata, CheckpointMetadataExt, DQNCheckpointHelper};
 use crate::training::replay_buffer::TransitionBatch;
 use crate::training::HybridRingBuffer;
 use crate::training::TensorTransitionBatch;
@@ -376,7 +376,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
 
     /// Perform one DQN training step (DEPRECATED - use Burn Trainer)
     ///
-    /// **⚠️ DEPRECATION NOTICE:**
+    /// **[STAGE:WARN] DEPRECATION NOTICE:**
     /// This manual implementation is deprecated. Use the Burn `TrainStep` implementation
     /// in `burn_trainer.rs` with Burn's training pipeline instead.
     ///
@@ -774,15 +774,13 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         // Save policy network using Burn's recorder with dimension info
         // Note: dimensions stored for checkpoint compatibility checking
         let metadata = CheckpointMetadata::new_with_dims(
+            "combined_policy".to_string(),
             episode,
-            self.step_count,
-            self.epsilon,
-            avg_reward,
-            avg_reward,
             0, // state_dim - not directly accessible from model, will be added to config
             0, // action_dim - not directly accessible from model
             0, // feature_dim - not directly accessible from model
-        );
+        )
+        .with_training_state(self.step_count, episode, self.epsilon, avg_reward);
 
         DQNCheckpointHelper::save(&self.model, directory, name, episode, &metadata)?;
 

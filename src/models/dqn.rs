@@ -1,3 +1,4 @@
+use crate::training::checkpoint::{CheckpointMetadata, Checkpointable};
 use burn::{
     config::Config,
     module::Module,
@@ -146,5 +147,25 @@ impl<B: Backend> QNetwork<B> {
         let q_values = value + (advantage - mean_advantage);
 
         q_values
+    }
+}
+
+impl<B: Backend> Checkpointable<B> for QNetwork<B> {
+    fn checkpoint_name(&self) -> &str {
+        "q_network"
+    }
+
+    fn checkpoint_metadata(&self) -> CheckpointMetadata {
+        CheckpointMetadata::new_with_dims(
+            "QNetwork".to_string(),
+            0, // epoch - will be updated by training loop
+            self.input_dim,
+            self.action_dim,
+            self.hidden_dim,
+        )
+    }
+
+    fn model(&self) -> &impl Module<B> {
+        self
     }
 }

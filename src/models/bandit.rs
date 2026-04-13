@@ -5,6 +5,8 @@ use burn::{
     prelude::*,
 };
 
+use crate::training::checkpoint::{CheckpointMetadata, Checkpointable};
+
 /// Contextual Bandit network for tier selection
 ///
 /// Takes state features and outputs:
@@ -121,5 +123,31 @@ impl<B: Backend> ContextualBandit<B> {
         let score = self.sigmoid.forward(self.score_head.forward(x));
 
         (features, score)
+    }
+}
+
+impl<B: Backend> Checkpointable<B> for ContextualBandit<B> {
+    fn checkpoint_name(&self) -> &str {
+        "contextual_bandit"
+    }
+
+    fn checkpoint_metadata(&self) -> CheckpointMetadata {
+        // Get dimensions from the FC layer weights
+        // fc1.weight shape: [hidden_dim, state_dim]
+        let state_dim = self.fc1.weight.shape().dims[1];
+        // feature_head.weight shape: [feature_dim, hidden_dim * 2]
+        let feature_dim = self.feature_head.weight.shape().dims[0];
+
+        CheckpointMetadata::new_with_dims(
+            "ContextualBandit".to_string(),
+            0, // epoch - will be updated by training loop
+            state_dim,
+            1, // action_dim = 1 (importance score output)
+            feature_dim,
+        )
+    }
+
+    fn model(&self) -> &impl Module<B> {
+        self
     }
 }

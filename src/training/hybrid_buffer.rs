@@ -13,6 +13,7 @@
 
 use crate::training::tensor_buffer::TensorTransitionBatch;
 use burn::tensor::{backend::Backend, Tensor, TensorData};
+use tracing;
 
 /// Hybrid buffer: stores transitions on CPU, converts to GPU only on sampling
 /// This matches Metis's proven pattern - no VRAM leaks!
@@ -139,12 +140,15 @@ impl<B: Backend> HybridRingBuffer<B> {
         batch_size: usize,
         device: &B::Device,
     ) -> Option<TensorTransitionBatch<B>> {
-        // 🔥 DEBUG: Sample batch logging
-        eprintln!(
-            "🔥 sample_batch() called with batch_size={}, device=...",
+        // [STAGE:CRITICAL] DEBUG: Sample batch logging
+        tracing::trace!(
+            "[STAGE:CRITICAL] sample_batch() called with batch_size={}, device=...",
             batch_size
         );
-        eprintln!("🔥 Backend in sample_batch: {}", std::any::type_name::<B>());
+        tracing::trace!(
+            "[STAGE:CRITICAL] Backend in sample_batch: {}",
+            std::any::type_name::<B>()
+        );
 
         // GPU DIAGNOSTIC: One-time device verification
         static BUFFER_DIAG_PRINTED: std::sync::atomic::AtomicBool =
@@ -153,19 +157,24 @@ impl<B: Backend> HybridRingBuffer<B> {
 
         if should_print_diag {
             let backend_name = std::any::type_name::<B>();
-            println!("🔍 HybridRingBuffer::sample_batch DIAGNOSTIC (first call):");
-            println!("   Backend type: {}", backend_name);
-            println!("   Device param: {:?}", device);
-            println!(
+            tracing::debug!("[STAGE:DIAG] HybridRingBuffer::sample_batch DIAGNOSTIC (first call):");
+            tracing::debug!("   Backend type: {}", backend_name);
+            tracing::debug!("   Device param: {:?}", device);
+            tracing::debug!(
                 "   Buffer size: {}, Buffer capacity: {}",
-                self.size, self.capacity
+                self.size,
+                self.capacity
             );
-            println!("   State dim: {}", self.state_dim);
+            tracing::debug!("   State dim: {}", self.state_dim);
             if backend_name.contains("NdArray") {
-                println!("   ❌ CRITICAL: Tensors will be created on CPU (NdArray backend)!");
-                println!("   → Tensors created via Tensor::from_data() will use NdArray device");
+                tracing::error!(
+                    "   [STAGE:FAIL] CRITICAL: Tensors will be created on CPU (NdArray backend)!"
+                );
+                tracing::error!(
+                    "   → Tensors created via Tensor::from_data() will use NdArray device"
+                );
             } else if backend_name.contains("Cuda") {
-                println!("   ✅ Tensors will be created on CUDA device");
+                tracing::info!("   [STAGE:OK] Tensors will be created on CUDA device");
             }
             BUFFER_DIAG_PRINTED.store(true, std::sync::atomic::Ordering::Relaxed);
         }

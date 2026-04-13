@@ -7,6 +7,7 @@
 //! - Soft target updates (τ parameter)
 
 use super::policy::*;
+use crate::training::checkpoint::{CheckpointMetadata, Checkpointable};
 use crate::training::gpu_trainable::GpuTrainable;
 use crate::training::tensor_buffer::TensorTransitionBatch;
 use crate::training::HybridRingBuffer;
@@ -225,9 +226,9 @@ pub struct CatcherPolicy<B: AutodiffBackend> {
 
 impl<B: AutodiffBackend> CatcherPolicy<B> {
     /// Create new Catcher DDPG policy
-    pub fn new(device: B::Device) -> Self {
-        let actor_config = ActorConfig::new();
-        let critic_config = CriticConfig::new();
+    pub fn new(device: B::Device, state_dim: usize) -> Self {
+        let actor_config = ActorConfig::new().with_state_dim(state_dim);
+        let critic_config = CriticConfig::new().with_state_dim(state_dim);
 
         let actor = actor_config.init(&device);
         let critic = critic_config.init(&device);
@@ -248,11 +249,11 @@ impl<B: AutodiffBackend> CatcherPolicy<B> {
             actor_lr: 1e-4,
             critic_lr: 1e-3,
             noise_std: 0.1,
-            gpu_buffer: HybridRingBuffer::new(100_000, 128),
+            gpu_buffer: HybridRingBuffer::new(100_000, state_dim),
             warmup_batch_size,
             warmup_complete: false,
             device,
-            state_dim: 128,
+            state_dim,
             action_dim: 1,
             step_count: 0,
             target_update_freq: 100,
@@ -263,10 +264,12 @@ impl<B: AutodiffBackend> CatcherPolicy<B> {
     pub fn with_config(
         device: B::Device,
         buffer_capacity: usize,
+        state_dim: usize,
+        action_dim: usize,
         target_update_freq: usize,
     ) -> Self {
-        let actor_config = ActorConfig::new();
-        let critic_config = CriticConfig::new();
+        let actor_config = ActorConfig::new().with_state_dim(state_dim);
+        let critic_config = CriticConfig::new().with_state_dim(state_dim);
 
         let actor = actor_config.init(&device);
         let critic = critic_config.init(&device);
@@ -287,15 +290,25 @@ impl<B: AutodiffBackend> CatcherPolicy<B> {
             actor_lr: 1e-4,
             critic_lr: 1e-3,
             noise_std: 0.1,
-            gpu_buffer: HybridRingBuffer::new(buffer_capacity, 128),
+            gpu_buffer: HybridRingBuffer::new(buffer_capacity, state_dim),
             warmup_batch_size,
             warmup_complete: false,
             device,
-            state_dim: 128,
-            action_dim: 1,
+            state_dim,
+            action_dim,
             step_count: 0,
             target_update_freq,
         }
+    }
+
+    /// Get state dimension
+    pub fn state_dim(&self) -> usize {
+        self.state_dim
+    }
+
+    /// Get action dimension
+    pub fn action_dim(&self) -> usize {
+        self.action_dim
     }
 
     /// Select action with optional exploration noise
@@ -698,6 +711,30 @@ impl<B: AutodiffBackend> GpuTrainable<B> for CatcherPolicy<B> {
 }
 
 // ============================================================================
+// Checkpointable Implementation
+// ============================================================================
+
+impl<B: AutodiffBackend> Checkpointable<B> for CatcherPolicy<B> {
+    fn checkpoint_name(&self) -> &str {
+        "catcher_policy"
+    }
+
+    fn checkpoint_metadata(&self) -> CheckpointMetadata {
+        CheckpointMetadata::new_with_dims(
+            "CatcherPolicy".to_string(),
+            0, // epoch - will be updated by training loop
+            self.state_dim,
+            self.action_dim,
+            self.state_dim, // feature_dim = state_dim for catcher
+        )
+    }
+
+    fn model(&self) -> &impl Module<B> {
+        &self.actor
+    }
+}
+
+// ============================================================================
 // BatchedActionSelector Implementation
 // ============================================================================
 
@@ -958,7 +995,7 @@ mod tests {
     #[test]
     fn test_catcher_policy_creation() {
         let device = <TestBackend as Backend>::Device::default();
-        let policy: CatcherPolicy<TestBackend> = CatcherPolicy::new(device);
+        let policy: CatcherPolicy<TestBackend> = CatcherPolicy::new(device, 128);
 
         assert_eq!(policy.state_dim, 128);
         assert_eq!(policy.action_dim, 1);
@@ -970,7 +1007,7 @@ mod tests {
     #[test]
     fn test_action_selection() {
         let device = <TestBackend as Backend>::Device::default();
-        let policy: CatcherPolicy<TestBackend> = CatcherPolicy::new(device);
+        let policy: CatcherPolicy<TestBackend> = CatcherPolicy::new(device, 128);
 
         // Test with Features state
         let state = State::Features(vec![1.0; 128]);
@@ -1008,7 +1045,7 @@ mod tests {
     #[test]
     fn test_action_selection_no_noise() {
         let device = <TestBackend as Backend>::Device::default();
-        let policy: CatcherPolicy<TestBackend> = CatcherPolicy::new(device);
+        let policy: CatcherPolicy<TestBackend> = CatcherPolicy::new(device, 128);
 
         let state = State::Features(vec![0.5; 128]);
         let action = policy.select_action_with_noise(&state, false);
@@ -1042,7 +1079,7 @@ mod tests {
     #[test]
     fn test_policy_type() {
         let device = <TestBackend as Backend>::Device::default();
-        let policy: CatcherPolicy<TestBackend> = CatcherPolicy::new(device);
+        let policy: CatcherPolicy<TestBackend> = CatcherPolicy::new(device, 128);
 
         assert_eq!(policy.policy_type(), PolicyType::Catcher);
         assert_eq!(policy.action_dim(), 1);

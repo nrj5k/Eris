@@ -182,6 +182,7 @@ use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor};
 use std::error::Error;
 use std::path::Path;
+use tracing;
 
 /// Configuration for DQN policy with exploration
 #[derive(Clone, Debug)]
@@ -312,23 +313,26 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
     pub fn new(config: DQNExplorerConfig, device: B::Device) -> Self {
         // GPU DIAGNOSTIC: Log backend type at policy creation
         let backend_name = std::any::type_name::<B>();
-        println!("🔍 DQNPolicy::new() GPU DIAGNOSTIC:");
-        println!("   Backend type: {}", backend_name);
-        println!("   Device: {:?}", device);
-        println!(
+        tracing::debug!("[STAGE:DIAG] DQNPolicy::new() GPU DIAGNOSTIC:");
+        tracing::debug!("   Backend type: {}", backend_name);
+        tracing::debug!("   Device: {:?}", device);
+        tracing::debug!(
             "   Input dim: {}, Action dim: {}",
-            config.dqn_config.input_dim, config.dqn_config.action_dim
+            config.dqn_config.input_dim,
+            config.dqn_config.action_dim
         );
 
         // Detect if we're accidentally on CPU
         if backend_name.contains("NdArray") {
-            println!("   ❌ WARNING: Backend is NdArray (CPU)! GPU training will NOT happen!");
+            tracing::warn!(
+                "   [STAGE:FAIL] WARNING: Backend is NdArray (CPU)! GPU training will NOT happen!"
+            );
         } else if backend_name.contains("Cuda") {
-            println!("   ✅ Backend is CUDA. GPU training should work.");
+            tracing::debug!("   [STAGE:OK] Backend is CUDA. GPU training should work.");
         } else if backend_name.contains("Wgpu") {
-            println!("   ⚠️  Backend is WGPU. GPU training via WebGPU.");
+            tracing::debug!("   [STAGE:WARN]  Backend is WGPU. GPU training via WebGPU.");
         } else if backend_name.contains("Rocm") {
-            println!("   ✅ Backend is ROCm. GPU training should work.");
+            tracing::debug!("   [STAGE:OK] Backend is ROCm. GPU training should work.");
         }
 
         // Initialize Q-network
@@ -350,11 +354,11 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
             let _test_output = q_network.forward(test_input);
             let _ = _test_output.into_data(); // Force GPU sync
             let bench_elapsed = bench_start.elapsed();
-            println!(
-                "   🔍 q_network forward pass (initialization): {:?}",
+            tracing::debug!(
+                "   [STAGE:DIAG] q_network forward pass (initialization): {:?}",
                 bench_elapsed
             );
-            println!("   🔍   → GPU typically <1ms, CPU typically 1-10ms");
+            tracing::debug!("   [STAGE:DIAG]   → GPU typically <1ms, CPU typically 1-10ms");
         }
 
         // Initialize GPU-native replay buffer
@@ -477,6 +481,41 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
     /// Decay exploration after training
     fn decay_exploration(&mut self) {
         self.explorer.decay();
+    }
+
+    /// Get reference to the Q-network model
+    pub fn model(&self) -> &QNetwork<B> {
+        &self.q_network
+    }
+
+    /// Get checkpoint metadata for this policy
+    pub fn checkpoint_metadata(&self) -> crate::training::checkpoint::CheckpointMetadata {
+        crate::training::checkpoint::CheckpointMetadata::new_with_dims(
+            "DQNPolicy".to_string(),
+            self.step_count,
+            self.config.dqn_config.input_dim,
+            self.config.dqn_config.action_dim,
+            self.config
+                .dqn_config
+                .hidden_layers
+                .first()
+                .copied()
+                .unwrap_or(64),
+        )
+    }
+}
+
+impl<B: AutodiffBackend> crate::training::checkpoint::Checkpointable<B> for DQNPolicy<B> {
+    fn checkpoint_name(&self) -> &str {
+        "dqn_policy"
+    }
+
+    fn checkpoint_metadata(&self) -> crate::training::checkpoint::CheckpointMetadata {
+        self.checkpoint_metadata()
+    }
+
+    fn model(&self) -> &impl burn::module::Module<B> {
+        &self.q_network
     }
 }
 
@@ -625,31 +664,37 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
     }
 
     fn train_step_gpu(&mut self, batch: &TensorTransitionBatch<B>) -> f32 {
-        // 🔥 DEBUG: Backend type verification and timing
+        // [STAGE:CRITICAL] DEBUG: Backend type verification and timing
         let backend_name = std::any::type_name::<B>();
-        eprintln!("🔥 train_step_gpu() backend: {}", backend_name);
+        tracing::trace!(
+            "[STAGE:CRITICAL] train_step_gpu() backend: {}",
+            backend_name
+        );
 
         if backend_name.contains("Cuda") {
-            eprintln!("🔥 ✓ Running on CUDA");
+            tracing::trace!("[STAGE:CRITICAL] ✓ Running on CUDA");
         } else if backend_name.contains("Wgpu") {
-            eprintln!("🔥 ✓ Running on WGPU");
+            tracing::trace!("[STAGE:CRITICAL] ✓ Running on WGPU");
         } else if backend_name.contains("NdArray") {
-            eprintln!("🔥 ✗ Running on CPU (NdArray)!");
+            tracing::trace!("[STAGE:CRITICAL] ✗ Running on CPU (NdArray)!");
         } else {
-            eprintln!("🔥 ? Unknown backend: {}", backend_name);
+            tracing::trace!("[STAGE:CRITICAL] ? Unknown backend: {}", backend_name);
         }
 
         // Time the forward pass
         let forward_start = std::time::Instant::now();
         let q_values = self.q_network.forward(batch.states.clone());
         let forward_time = forward_start.elapsed();
-        eprintln!("🔥 Q-network forward took: {:?}", forward_time);
+        tracing::trace!(
+            "[STAGE:CRITICAL] Q-network forward took: {:?}",
+            forward_time
+        );
 
         // GPU should be < 5ms, CPU might be > 50ms
         if forward_time.as_millis() > 10 {
-            eprintln!("🔥 ⚠️  Forward pass is slow - likely CPU!");
+            tracing::warn!("[STAGE:WARN] Forward pass is slow - likely CPU!");
         } else {
-            eprintln!("🔥 ✓ Forward pass is fast - likely GPU!");
+            tracing::trace!("[STAGE:OK] Forward pass is fast - likely GPU!");
         }
 
         // GPU DIAGNOSTIC: Verify backend type and measure timing
@@ -660,18 +705,20 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
 
         if should_print_diag {
             let backend_name = std::any::type_name::<B>();
-            println!("🔍 train_step_gpu DIAGNOSTIC (first call):");
-            println!("   Backend type: {}", backend_name);
-            println!("   Device: {:?}", self.device);
-            println!("   batch.states shape: {:?}", batch.states.shape());
-            println!("   batch.states dims: {:?}", batch.states.dims());
+            tracing::debug!("[STAGE:DIAG] train_step_gpu DIAGNOSTIC (first call):");
+            tracing::debug!("   Backend type: {}", backend_name);
+            tracing::debug!("   Device: {:?}", self.device);
+            tracing::debug!("   batch.states shape: {:?}", batch.states.shape());
+            tracing::debug!("   batch.states dims: {:?}", batch.states.dims());
 
             if backend_name.contains("NdArray") {
-                println!("   ❌ CRITICAL: Backend is NdArray (CPU)! Training on CPU, not GPU!");
+                tracing::debug!(
+                    "   [STAGE:FAIL] CRITICAL: Backend is NdArray (CPU)! Training on CPU, not GPU!"
+                );
             } else if backend_name.contains("Cuda") {
-                println!("   ✅ Backend is CUDA. Training on GPU.");
+                tracing::debug!("   [STAGE:OK] Backend is CUDA. Training on GPU.");
             } else if backend_name.contains("Wgpu") {
-                println!("   ⚠️  Backend is WGPU. Training on WebGPU.");
+                tracing::debug!("   [STAGE:WARN]  Backend is WGPU. Training on WebGPU.");
             }
             GPU_DIAGNOSTIC_PRINTED.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -710,14 +757,18 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
         // the caller (train_step_gpu_native in gpu_trainable.rs or the coordinator)
         let train_elapsed = train_start.elapsed();
         if self.step_count <= 3 || self.step_count % 500 == 0 {
-            println!(
-                "🔍 train_step_gpu #{}: {:?} (loss={:.4})",
-                self.step_count, train_elapsed, loss
+            tracing::debug!(
+                "[STAGE:DIAG] train_step_gpu #{}: {:?} (loss={:.4})",
+                self.step_count,
+                train_elapsed,
+                loss
             );
             // GPU: training step < 50ms for batch_size=2048
             // CPU: training step > 100ms for batch_size=2048
             if train_elapsed.as_millis() > 100 {
-                println!("   ⚠️  SLOW training step (>100ms) - may indicate CPU backend!");
+                tracing::warn!(
+                    "   [STAGE:WARN]  SLOW training step (>100ms) - may indicate CPU backend!"
+                );
             }
         }
 

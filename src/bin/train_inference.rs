@@ -16,6 +16,15 @@ use eris::env::IOBufferEnv;
 use eris::models::CombinedModelConfig;
 use eris::{Environment, Space};
 
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "eris-train-inference",
@@ -34,6 +43,10 @@ struct Args {
     /// Maximum steps per episode
     #[arg(short, long, default_value = "10")]
     max_steps: usize,
+
+    /// Log level for tracing output
+    #[arg(long, value_enum, default_value = "info")]
+    log_level: LogLevel,
 }
 
 fn main() {
@@ -42,14 +55,19 @@ fn main() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024) // 64 MB stack (up from default 8 MB)
         .spawn(|| {
-            // Initialize logging
-            let subscriber = FmtSubscriber::builder()
-                .with_max_level(Level::INFO)
-                .finish();
+            let args = Args::parse();
+
+            // Initialize logging with user-specified level
+            let level = match args.log_level {
+                LogLevel::Trace => Level::TRACE,
+                LogLevel::Debug => Level::DEBUG,
+                LogLevel::Info => Level::INFO,
+                LogLevel::Warn => Level::WARN,
+                LogLevel::Error => Level::ERROR,
+            };
+            let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
             tracing::subscriber::set_global_default(subscriber)
                 .expect("Failed to set tracing subscriber");
-
-            let args = Args::parse();
 
             println!("=== Testing Inference Mode (NdArray Backend) ===");
             println!("This tests the model without autodiff/gradient computation");

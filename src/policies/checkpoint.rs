@@ -1,16 +1,15 @@
-//! # Unified Policy Checkpointing
+//! # Policy Checkpoint Utilities
 //!
-//! This module provides a standardized checkpointing framework for all cache policies.
-//! It defines a common trait and utilities for saving and loading policy state,
-//! metadata, and configuration.
+//! This module provides utility functions for saving and loading policy checkpoint
+//! metadata and configuration files.
 //!
 //! ## Overview
 //!
-//! The checkpoint system consists of:
+//! The checkpoint utilities provide:
 //!
-//! 1. **CheckpointMetadata**: Metadata about a saved checkpoint
-//! 2. **Checkpoint trait**: Common interface for policy checkpointing
-//! 3. **Helper functions**: Utilities for saving/loading metadata and config
+//! 1. **save_metadata/load_metadata**: Save and load checkpoint metadata
+//! 2. **save_config/load_config**: Save and load model configuration
+//! 3. **validate_checkpoint_dir**: Validate checkpoint directory structure
 //!
 //! ## Design Philosophy
 //!
@@ -22,352 +21,24 @@
 //! ## Usage Example
 //!
 //! ```rust,ignore
-//! use eris::policies::checkpoint::{Checkpoint, CheckpointMetadata};
+//! use eris::policies::checkpoint::{save_metadata, load_metadata};
+//! use eris::training::checkpoint::CheckpointMetadata;
 //! use std::path::Path;
 //!
-//! // Save a checkpoint
+//! // Save metadata
 //! let checkpoint_dir = Path::new("checkpoints/bandit_policy_v1");
-//! policy.save_checkpoint(checkpoint_dir)?;
+//! let metadata = CheckpointMetadata::new("Bandit".to_string(), 1, 1000, json!({}));
+//! save_metadata(checkpoint_dir, &metadata)?;
 //!
-//! // Load a checkpoint
-//! let mut policy = BanditPolicy::new(config, &device);
-//! policy.load_checkpoint(checkpoint_dir)?;
-//!
-//! // Get metadata
-//! let metadata = policy.checkpoint_metadata();
+//! // Load metadata
+//! let metadata = load_metadata(checkpoint_dir)?;
 //! println!("Policy type: {}", metadata.policy_type);
-//! println!("Steps: {}", metadata.step_count);
 //! ```
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
-
-/// Current checkpoint format version
-///
-/// Increment this when making breaking changes to the checkpoint format.
-/// Old checkpoints may need migration code.
-pub const CHECKPOINT_VERSION: u32 = 1;
-
-/// Metadata for checkpoint serialization
-///
-/// This struct contains information about a policy checkpoint that enables
-/// versioning, debugging, and policy identification.
-///
-/// # Fields
-///
-/// * `policy_type` - Human-readable policy type (e.g., "Bandit", "DQN")
-/// * `version` - Checkpoint format version for backward compatibility
-/// * `created_at` - ISO 8601 timestamp when checkpoint was created
-/// * `step_count` - Number of training steps completed
-/// * `episode_count` - Number of episodes completed (optional)
-/// * `best_reward` - Best reward seen during training (optional)
-/// * `model_config` - Model architecture configuration as JSON
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let metadata = CheckpointMetadata {
-///     policy_type: "Bandit".to_string(),
-///     version: 1,
-///     created_at: "2024-01-15T10:30:00Z".to_string(),
-///     step_count: 1000,
-///     episode_count: Some(100),
-///     best_reward: Some(0.85),
-///     model_config: json!({"hidden_layers": [64, 128]}),
-/// };
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckpointMetadata {
-    /// Policy type (e.g., "Bandit", "DQN", "Metis", "Catcher", "Cacheus")
-    pub policy_type: String,
-
-    /// Checkpoint version for backward compatibility
-    pub version: u32,
-
-    /// Creation timestamp in ISO 8601 format
-    pub created_at: String,
-
-    /// Total training steps completed
-    pub step_count: usize,
-
-    /// Total episodes completed (if applicable to policy)
-    pub episode_count: Option<usize>,
-
-    /// Best reward achieved during training (if tracked)
-    pub best_reward: Option<f32>,
-
-    /// Model architecture configuration
-    pub model_config: serde_json::Value,
-}
-
-impl CheckpointMetadata {
-    /// Create new checkpoint metadata with current timestamp
-    ///
-    /// # Arguments
-    ///
-    /// * `policy_type` - Name of the policy type
-    /// * `step_count` - Number of training steps completed
-    /// * `model_config` - Model configuration as JSON
-    ///
-    /// # Returns
-    ///
-    /// New CheckpointMetadata with current timestamp and version 1
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let metadata = CheckpointMetadata::new(
-    ///     "Bandit".to_string(),
-    ///     1000,
-    ///     json!({"layers": [64, 128]})
-    /// );
-    /// ```
-    pub fn new(policy_type: String, step_count: usize, model_config: serde_json::Value) -> Self {
-        Self {
-            policy_type,
-            version: CHECKPOINT_VERSION,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            step_count,
-            episode_count: None,
-            best_reward: None,
-            model_config,
-        }
-    }
-
-    /// Create metadata builder for optional fields
-    ///
-    /// # Returns
-    ///
-    /// Builder instance for constructing metadata
-    pub fn builder() -> CheckpointMetadataBuilder {
-        CheckpointMetadataBuilder::default()
-    }
-}
-
-/// Builder for CheckpointMetadata
-///
-/// Allows setting optional fields during construction.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let metadata = CheckpointMetadata::builder()
-///     .policy_type("Bandit")
-///     .step_count(1000)
-///     .model_config(json!({"layers": [64]}))
-///     .episode_count(100)
-///     .best_reward(0.85)
-///     .build()?;
-/// ```
-#[derive(Debug, Default)]
-pub struct CheckpointMetadataBuilder {
-    policy_type: Option<String>,
-    step_count: Option<usize>,
-    episode_count: Option<usize>,
-    best_reward: Option<f32>,
-    model_config: Option<serde_json::Value>,
-}
-
-impl CheckpointMetadataBuilder {
-    /// Set policy type
-    pub fn policy_type(mut self, policy_type: impl Into<String>) -> Self {
-        self.policy_type = Some(policy_type.into());
-        self
-    }
-
-    /// Set step count
-    pub fn step_count(mut self, step_count: usize) -> Self {
-        self.step_count = Some(step_count);
-        self
-    }
-
-    /// Set episode count
-    pub fn episode_count(mut self, episode_count: usize) -> Self {
-        self.episode_count = Some(episode_count);
-        self
-    }
-
-    /// Set best reward
-    pub fn best_reward(mut self, best_reward: f32) -> Self {
-        self.best_reward = Some(best_reward);
-        self
-    }
-
-    /// Set model configuration
-    pub fn model_config(mut self, model_config: serde_json::Value) -> Self {
-        self.model_config = Some(model_config);
-        self
-    }
-
-    /// Build the final CheckpointMetadata
-    ///
-    /// # Errors
-    ///
-    /// Returns error if required fields are missing
-    pub fn build(self) -> Result<CheckpointMetadata, Box<dyn Error>> {
-        let policy_type = self.policy_type.ok_or("policy_type is required")?;
-        let step_count = self.step_count.ok_or("step_count is required")?;
-        let model_config = self.model_config.ok_or("model_config is required")?;
-
-        Ok(CheckpointMetadata {
-            policy_type,
-            version: CHECKPOINT_VERSION,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            step_count,
-            episode_count: self.episode_count,
-            best_reward: self.best_reward,
-            model_config,
-        })
-    }
-}
-
-/// Trait for policies that support checkpointing
-///
-/// This trait defines a common interface for saving and loading policy state.
-/// All policies (Bandit, DQN, Metis, Catcher, Cacheus) should implement this trait.
-///
-/// # Design Goals
-///
-/// - **Consistency**: All policies use the same checkpoint interface
-/// - **Safety**: Errors are properly handled and reported
-/// - **Extensibility**: New fields can be added without breaking compatibility
-///
-/// # Required Methods
-///
-/// - `save_checkpoint`: Save policy state to a directory
-/// - `load_checkpoint`: Load policy state from a directory
-/// - `checkpoint_metadata`: Get metadata about the current checkpoint
-///
-/// # Example Implementation
-///
-/// ```rust,ignore
-/// impl<B: AutodiffBackend> Checkpoint for MyPolicy<B> {
-///     fn save_checkpoint(&self, path: &Path) -> Result<(), Box<dyn Error>> {
-///         // Create checkpoint directory
-///         fs::create_dir_all(path)?;
-///
-///         // Save metadata
-///         let metadata = self.checkpoint_metadata();
-///         save_metadata(path, &metadata)?;
-///
-///         // Save model weights
-///         let weights_path = path.join("weights.bin");
-///         self.save_weights(&weights_path)?;
-///
-///         Ok(())
-///     }
-///
-///     fn load_checkpoint(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
-///         // Load metadata
-///         let metadata = load_metadata(path)?;
-///
-///         // Validate policy type
-///         if metadata.policy_type != "MyPolicy" {
-///             return Err(format!("Invalid policy type: {}", metadata.policy_type).into());
-///         }
-///
-///         // Load weights
-///         let weights_path = path.join("weights.bin");
-///         self.load_weights(&weights_path)?;
-///
-///         Ok(())
-///     }
-///
-///     fn checkpoint_metadata(&self) -> CheckpointMetadata {
-///         CheckpointMetadata::new(
-///             "MyPolicy".to_string(),
-///             self.step_count,
-///             self.get_config_json(),
-///         )
-///     }
-/// }
-/// ```
-pub trait Checkpoint {
-    /// Save policy state to directory
-    ///
-    /// Creates a checkpoint at the specified path containing:
-    /// - `metadata.json`: Checkpoint metadata
-    /// - `config.json`: Model configuration
-    /// - Policy-specific files (weights, replay buffer, etc.)
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Directory path for checkpoint files
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` on success, error on failure
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Directory creation fails
-    /// - File write fails
-    /// - Serialization fails
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let checkpoint_dir = Path::new("checkpoints/policy_v1");
-    /// policy.save_checkpoint(checkpoint_dir)?;
-    /// ```
-    fn save_checkpoint(&self, path: &Path) -> Result<(), Box<dyn Error>>;
-
-    /// Load policy state from directory
-    ///
-    /// Loads a checkpoint from the specified path, restoring:
-    /// - Model configuration
-    /// - Model weights
-    /// - Training state
-    /// - Optimizer state (if applicable)
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Directory path containing checkpoint files
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` on success, error on failure
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Checkpoint directory doesn't exist
-    /// - Required files are missing
-    /// - Deserialization fails
-    /// - Version mismatch
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let checkpoint_dir = Path::new("checkpoints/policy_v1");
-    /// let mut policy = MyPolicy::new(config, &device);
-    /// policy.load_checkpoint(checkpoint_dir)?;
-    /// ```
-    fn load_checkpoint(&mut self, path: &Path) -> Result<(), Box<dyn Error>>;
-
-    /// Get checkpoint metadata
-    ///
-    /// Returns metadata about the current policy state, including:
-    /// - Policy type
-    /// - Training progress
-    /// - Model configuration summary
-    ///
-    /// # Returns
-    ///
-    /// CheckpointMetadata struct
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let metadata = policy.checkpoint_metadata();
-    /// println!("Policy: {}", metadata.policy_type);
-    /// println!("Steps: {}", metadata.step_count);
-    /// ```
-    fn checkpoint_metadata(&self) -> CheckpointMetadata;
-}
 
 /// Save checkpoint metadata to JSON file
 ///
@@ -391,14 +62,14 @@ pub trait Checkpoint {
 /// # Example
 ///
 /// ```rust,ignore
-/// let metadata = CheckpointMetadata::new(
-///     "Bandit".to_string(),
-///     1000,
-///     json!({"layers": [64]})
-/// );
+/// use eris::training::checkpoint::CheckpointMetadata;
+/// let metadata = CheckpointMetadata::new("Bandit".to_string(), 1, 1000, json!({}));
 /// save_metadata(Path::new("checkpoints/policy_v1"), &metadata)?;
 /// ```
-pub fn save_metadata(path: &Path, metadata: &CheckpointMetadata) -> Result<(), Box<dyn Error>> {
+pub fn save_metadata(
+    path: &Path,
+    metadata: &crate::training::checkpoint::CheckpointMetadata,
+) -> Result<(), Box<dyn Error>> {
     // Create directory if it doesn't exist
     fs::create_dir_all(path)?;
 
@@ -438,7 +109,9 @@ pub fn save_metadata(path: &Path, metadata: &CheckpointMetadata) -> Result<(), B
 /// let metadata = load_metadata(Path::new("checkpoints/policy_v1"))?;
 /// println!("Policy type: {}", metadata.policy_type);
 /// ```
-pub fn load_metadata(path: &Path) -> Result<CheckpointMetadata, Box<dyn Error>> {
+pub fn load_metadata(
+    path: &Path,
+) -> Result<crate::training::checkpoint::CheckpointMetadata, Box<dyn Error>> {
     let metadata_path = path.join("metadata.json");
 
     // Check if metadata file exists
@@ -448,7 +121,7 @@ pub fn load_metadata(path: &Path) -> Result<CheckpointMetadata, Box<dyn Error>> 
 
     // Read and deserialize
     let json = fs::read_to_string(&metadata_path)?;
-    let metadata: CheckpointMetadata = serde_json::from_str(&json)?;
+    let metadata: crate::training::checkpoint::CheckpointMetadata = serde_json::from_str(&json)?;
 
     log::info!("Loaded checkpoint metadata from {:?}", metadata_path);
     Ok(metadata)
@@ -599,79 +272,17 @@ pub fn validate_checkpoint_dir(path: &Path, required_files: &[&str]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::training::checkpoint::CheckpointMetadata;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_checkpoint_metadata_creation() {
-        let metadata =
-            CheckpointMetadata::new("Bandit".to_string(), 1000, json!({"layers": [64, 128]}));
-
-        assert_eq!(metadata.policy_type, "Bandit");
-        assert_eq!(metadata.version, CHECKPOINT_VERSION);
-        assert_eq!(metadata.step_count, 1000);
-        assert!(metadata.episode_count.is_none());
-        assert!(metadata.best_reward.is_none());
-        assert!(!metadata.created_at.is_empty());
-    }
-
-    #[test]
-    fn test_checkpoint_metadata_builder() {
-        let metadata = CheckpointMetadata::builder()
-            .policy_type("DQN")
-            .step_count(5000)
-            .episode_count(100)
-            .best_reward(0.95)
-            .model_config(json!({"hidden_layers": [256, 128]}))
-            .build()
-            .expect("Failed to build metadata");
-
-        assert_eq!(metadata.policy_type, "DQN");
-        assert_eq!(metadata.step_count, 5000);
-        assert_eq!(metadata.episode_count, Some(100));
-        assert_eq!(metadata.best_reward, Some(0.95));
-    }
-
-    #[test]
-    fn test_checkpoint_metadata_builder_missing_fields() {
-        let result = CheckpointMetadata::builder().policy_type("Test").build();
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("step_count"));
-    }
-
-    #[test]
-    fn test_checkpoint_metadata_serialization() {
-        let metadata = CheckpointMetadata {
-            policy_type: "Bandit".to_string(),
-            version: 1,
-            created_at: "2024-01-15T10:30:00Z".to_string(),
-            step_count: 1000,
-            episode_count: Some(100),
-            best_reward: Some(0.85),
-            model_config: json!({"input_dim": 15, "hidden_layers": [64]}),
-        };
-
-        // Serialize to JSON
-        let json = serde_json::to_string(&metadata).expect("Failed to serialize");
-        assert!(json.contains("Bandit"));
-        assert!(json.contains("1000"));
-
-        // Deserialize back
-        let deserialized: CheckpointMetadata =
-            serde_json::from_str(&json).expect("Failed to deserialize");
-
-        assert_eq!(deserialized.policy_type, metadata.policy_type);
-        assert_eq!(deserialized.step_count, metadata.step_count);
-        assert_eq!(deserialized.episode_count, metadata.episode_count);
-    }
 
     #[test]
     fn test_save_metadata() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let checkpoint_path = temp_dir.path();
 
-        let metadata = CheckpointMetadata::new("Bandit".to_string(), 500, json!({"test": "value"}));
+        let metadata = CheckpointMetadata::new("Bandit".to_string(), 1, json!({"test": "value"}));
 
         // Save metadata
         save_metadata(checkpoint_path, &metadata).expect("Failed to save metadata");
@@ -683,7 +294,7 @@ mod tests {
         // Verify content
         let content = fs::read_to_string(&metadata_file).expect("Failed to read metadata file");
         assert!(content.contains("Bandit"));
-        assert!(content.contains("500"));
+        assert!(content.contains("test"));
     }
 
     #[test]
@@ -694,12 +305,18 @@ mod tests {
         // Create metadata.json manually
         let metadata = CheckpointMetadata {
             policy_type: "DQN".to_string(),
-            version: 1,
+            version: 2,
             created_at: "2024-01-15T10:30:00Z".to_string(),
+            epoch: 1,
             step_count: 2500,
             episode_count: None,
+            epsilon: 0.1,
             best_reward: None,
-            model_config: json!({}),
+            avg_reward: None,
+            state_dim: None,
+            action_dim: None,
+            feature_dim: None,
+            model_config: None,
         };
 
         let json = serde_json::to_string_pretty(&metadata).expect("Failed to serialize");
@@ -711,7 +328,7 @@ mod tests {
 
         assert_eq!(loaded.policy_type, "DQN");
         assert_eq!(loaded.step_count, 2500);
-        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.version, 2);
     }
 
     #[test]
@@ -807,8 +424,7 @@ mod tests {
         let checkpoint_path = temp_dir.path();
 
         // Create and save metadata
-        let original =
-            CheckpointMetadata::new("Metis".to_string(), 10000, json!({"feature_dim": 20}));
+        let original = CheckpointMetadata::new("Metis".to_string(), 1, json!({"feature_dim": 20}));
 
         save_metadata(checkpoint_path, &original).expect("Failed to save");
 
@@ -892,40 +508,5 @@ mod tests {
         let result = validate_checkpoint_dir(&file_path, &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not a directory"));
-    }
-
-    #[test]
-    fn test_metadata_with_all_optional_fields() {
-        let metadata = CheckpointMetadata {
-            policy_type: "Catcher".to_string(),
-            version: 1,
-            created_at: "2024-01-15T12:00:00Z".to_string(),
-            step_count: 5000,
-            episode_count: Some(200),
-            best_reward: Some(0.92),
-            model_config: json!({"type": "catcher"}),
-        };
-
-        let json = serde_json::to_string(&metadata).expect("Failed to serialize");
-        let loaded: CheckpointMetadata =
-            serde_json::from_str(&json).expect("Failed to deserialize");
-
-        assert_eq!(loaded.episode_count, Some(200));
-        assert_eq!(loaded.best_reward, Some(0.92));
-    }
-
-    #[test]
-    fn test_checkpoint_version_constant() {
-        // Ensure version is properly set
-        assert_eq!(CHECKPOINT_VERSION, 1u32);
-    }
-
-    #[test]
-    fn test_metadata_created_at_valid_iso8601() {
-        let metadata = CheckpointMetadata::new("Test".to_string(), 100, json!({}));
-
-        // Verify timestamp is valid ISO 8601 format
-        let parsed = chrono::DateTime::parse_from_rfc3339(&metadata.created_at);
-        assert!(parsed.is_ok(), "Created_at should be valid ISO 8601");
     }
 }

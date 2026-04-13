@@ -8,6 +8,7 @@ license = "GPL-3.0"
 [dependencies]
 burn = { version = "0.20", default-features = false }
 log = "0.4"
+env_logger = "0.11"
 rand = "0.10"
 # thiserror removed - not used
 serde = { version = "1.0", features = ["derive"] }

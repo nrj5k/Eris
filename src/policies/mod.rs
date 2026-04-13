@@ -11,10 +11,10 @@ pub mod policy;
 pub mod td_loss;
 pub mod tensor_utils;
 
+pub use crate::training::checkpoint::{CheckpointMetadata, Checkpointable};
 pub use bandit_policy::{BanditPolicy, BanditPolicyConfig};
 pub use cacheus::CacheusPolicy;
 pub use catcher::CatcherPolicy;
-pub use checkpoint::{Checkpoint, CheckpointMetadata, CheckpointMetadataBuilder};
 pub use dqn_policy::{DQNExplorerConfig, DQNPolicy};
 pub use exploration::{
     EpsilonGreedy, ExplorationConfig, ExplorationStrategy, ThompsonSampling, UCBExplorer,

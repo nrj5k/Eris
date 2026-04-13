@@ -66,3 +66,29 @@ pub use warmup::{should_train, train_step_with_warmup};
 
 // Version info
 pub const VERSION: &str = "0.1.0";
+
+/// Initialize the logging backend for burnme-rly.
+///
+/// Call this once at program start to enable `RUST_LOG`-based filtering.
+///
+/// # Examples
+///
+/// ```
+/// // In your main.rs:
+/// fn main() {
+///     burnme_rly::init_logging();
+///     // ... rest of your code
+/// }
+/// ```
+///
+/// Then run with:
+/// ```bash
+/// RUST_LOG=debug cargo run
+/// RUST_LOG=burnme_rly=trace cargo run
+/// ```
+///
+/// If not called, `log::info!` / `log::debug!` etc. are silent no-ops
+/// (the default `log` crate behavior without a backend).
+pub fn init_logging() {
+    env_logger::init();
+}

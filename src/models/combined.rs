@@ -2,6 +2,7 @@ use burn::{config::Config, module::Module, prelude::*};
 
 use crate::models::{ContextualBandit, ContextualBanditConfig, QNetwork, QNetworkConfig};
 use crate::tier::TierSelector;
+use crate::training::checkpoint::{CheckpointMetadata, Checkpointable};
 
 /// Combined model integrating contextual bandit and Q-network
 ///
@@ -165,6 +166,45 @@ impl<B: Backend> CombinedModel<B> {
             // Encode action: tier * 2 + op
             tier_idx * 2 + op_idx as usize
         }
+    }
+}
+
+impl<B: Backend> Checkpointable<B> for CombinedModel<B> {
+    fn checkpoint_name(&self) -> &str {
+        "combined_model"
+    }
+
+    fn checkpoint_metadata(&self) -> CheckpointMetadata {
+        // Delegate to sub-models for their config info
+        let bandit_metadata = self.bandit.checkpoint_metadata();
+        let qnetwork_metadata = self.qnetwork.checkpoint_metadata();
+
+        // Merge dimensions - use the larger of the two for state/action
+        let state_dim = bandit_metadata.state_dim.max(qnetwork_metadata.state_dim);
+        let action_dim = bandit_metadata.action_dim.max(qnetwork_metadata.action_dim);
+        let feature_dim = bandit_metadata
+            .feature_dim
+            .max(qnetwork_metadata.feature_dim);
+
+        let mut metadata = CheckpointMetadata::new_with_dims(
+            "CombinedModel".to_string(),
+            0, // epoch - will be updated by training loop
+            state_dim.unwrap_or(0),
+            action_dim.unwrap_or(0),
+            feature_dim.unwrap_or(0),
+        );
+
+        // Store sub-model configs as JSON
+        metadata.model_config = Some(serde_json::json!({
+            "bandit": bandit_metadata.model_config,
+            "qnetwork": qnetwork_metadata.model_config,
+        }));
+
+        metadata
+    }
+
+    fn model(&self) -> &impl Module<B> {
+        self
     }
 }
 

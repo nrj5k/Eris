@@ -12,6 +12,15 @@ use eris::config::FullTrainingConfig;
 use eris::env::IOBufferEnv;
 use eris::{Environment, Space};
 
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "eris-test-env", version = "0.1.0")]
 struct Args {
@@ -23,16 +32,24 @@ struct Args {
 
     #[arg(short, long, default_value = "10")]
     max_steps: usize,
+
+    #[arg(long, value_enum, default_value = "info")]
+    log_level: LogLevel,
 }
 
 fn main() {
-    // Initialize logging
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
-
     let args = Args::parse();
+
+    // Initialize logging with user-specified level
+    let level = match args.log_level {
+        LogLevel::Trace => Level::TRACE,
+        LogLevel::Debug => Level::DEBUG,
+        LogLevel::Info => Level::INFO,
+        LogLevel::Warn => Level::WARN,
+        LogLevel::Error => Level::ERROR,
+    };
+    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     println!("=== Testing Environment Only (NO Model) ===");
     println!("This isolates the stack overflow issue");

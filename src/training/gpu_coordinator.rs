@@ -38,6 +38,7 @@
 //! println!("Training complete! Avg reward: {:.2}", metrics.avg_reward);
 //! ```
 
+use crate::training::checkpoint::CheckpointMetadataExt;
 use burn::tensor::backend::AutodiffBackend;
 use std::error::Error;
 
@@ -441,21 +442,25 @@ impl GpuTrainingCoordinator {
         checkpoint_prefix: &str,
     ) -> Result<TrainingMetrics, Box<dyn Error>>
     where
-        A: crate::training::GpuTrainable<B> + BatchedActionSelector<B>,
+        A: crate::training::GpuTrainable<B>
+            + BatchedActionSelector<B>
+            + crate::training::checkpoint::Checkpointable<B>,
         E: VecEnvironment,
         B: AutodiffBackend,
     {
         // GPU DIAGNOSTIC: Verify backend type at training start
         {
             let backend_name = std::any::type_name::<B>();
-            println!("🔍 GpuTrainingCoordinator::run_training DIAGNOSTIC:");
-            println!("   Backend type: {}", backend_name);
-            println!("   Device: {:?}", device);
+            tracing::debug!("[STAGE:DIAG] GpuTrainingCoordinator::run_training DIAGNOSTIC:");
+            tracing::debug!("   Backend type: {}", backend_name);
+            tracing::debug!("   Device: {:?}", device);
             if backend_name.contains("NdArray") {
-                println!("   ❌ CRITICAL: Backend is NdArray (CPU)! All training on CPU!");
-                println!("   → This likely means --backend cuda was not used, or cuda feature not compiled");
+                tracing::error!(
+                    "[STAGE:FAIL] CRITICAL: Backend is NdArray (CPU)! All training on CPU!"
+                );
+                tracing::error!("   → This likely means --backend cuda was not used, or cuda feature not compiled");
             } else if backend_name.contains("Cuda") {
-                println!("   ✅ Backend is CUDA. Training should use GPU.");
+                tracing::debug!("   [STAGE:OK] Backend is CUDA. Training should use GPU.");
             }
         }
 
@@ -467,6 +472,8 @@ impl GpuTrainingCoordinator {
         let mut train_steps = 0;
         let mut steps_since_last_train = 0;
         let mut last_checkpoint_episode = 0; // Track last checkpoint to prevent duplicates
+        let mut best_reward: f32 = 0.0; // Track best reward for checkpoint metadata
+        let mut last_episode_reward: f32 = 0.0; // Track last episode reward for checkpoint metadata
 
         // Initialize per-environment tracking
         let num_envs = env.num_envs();
@@ -523,7 +530,10 @@ impl GpuTrainingCoordinator {
 
                 // Episode end handling
                 if result.done {
+                    let episode_reward = env_cumulative_rewards[i] as f32;
+                    last_episode_reward = episode_reward;
                     episode_rewards.push(env_cumulative_rewards[i]);
+                    best_reward = best_reward.max(episode_reward);
                     env_cumulative_rewards[i] = 0.0;
                     env_steps[i] = 0;
                     episode_count += 1;
@@ -576,8 +586,8 @@ impl GpuTrainingCoordinator {
                     0.0
                 };
 
-                println!(
-                    "⏱️  Steps: {} ({:.1} per env) | Episodes: {}/{} | Avg Reward: {:.2} | Avg Loss: {:.4} | ε: {:.3}",
+                tracing::info!(
+                    "[STAGE:TIME]  Steps: {} ({:.1} per env) | Episodes: {}/{} | Avg Reward: {:.2} | Avg Loss: {:.4} | ε: {:.3}",
                     total_steps,
                     total_steps as f64 / num_envs as f64,
                     episode_count,
@@ -593,11 +603,32 @@ impl GpuTrainingCoordinator {
                 && episode_count % self.checkpoint_interval == 0
                 && episode_count != last_checkpoint_episode
             {
-                let checkpoint_path = format!("{}_episode_{}", checkpoint_prefix, episode_count);
-                // Note: Actual checkpoint saving would require agent to implement a save method
-                // This is a placeholder for the checkpoint path
-                println!("📦 Checkpoint saved: {}", checkpoint_path);
-                last_checkpoint_episode = episode_count; // Prevent duplicate saves
+                let checkpoint_dir = format!("{}", checkpoint_prefix);
+                let checkpoint_name = format!("episode_{}", episode_count);
+
+                // Get metadata from agent and update with training state
+                let metadata = agent.checkpoint_metadata().with_training_state(
+                    total_steps,
+                    episode_count,
+                    agent.epsilon(),
+                    best_reward,
+                );
+
+                match crate::training::checkpoint::save_checkpoint::<B, _>(
+                    agent.model(),
+                    &checkpoint_dir,
+                    &checkpoint_name,
+                    episode_count,
+                    &metadata,
+                ) {
+                    Ok(path) => {
+                        tracing::info!("[STAGE:checkpoint_saved] {}", path.display());
+                        last_checkpoint_episode = episode_count;
+                    }
+                    Err(e) => {
+                        tracing::error!("[STAGE:checkpoint_error] Failed to save: {}", e);
+                    }
+                }
             }
         }
 
@@ -644,7 +675,9 @@ impl GpuTrainingCoordinator {
         checkpoint_prefix: &str,
     ) -> Result<TrainingMetrics, Box<dyn Error>>
     where
-        A: crate::training::GpuTrainable<B> + BatchedActionSelector<B>,
+        A: crate::training::GpuTrainable<B>
+            + BatchedActionSelector<B>
+            + crate::training::checkpoint::Checkpointable<B>,
         E: VecEnvironment,
         B: AutodiffBackend,
     {
@@ -654,8 +687,8 @@ impl GpuTrainingCoordinator {
 
         metrics.steps_per_second = Some(metrics.total_steps as f64 / elapsed.as_secs_f64());
 
-        println!(
-            "\n🏁 Training complete in {:.2}s ({:.0} steps/sec)",
+        tracing::info!(
+            "\n[STAGE:DONE] Training complete in {:.2}s ({:.0} steps/sec)",
             elapsed.as_secs_f64(),
             metrics.steps_per_second.unwrap_or(0.0)
         );

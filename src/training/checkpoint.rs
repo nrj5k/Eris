@@ -8,63 +8,81 @@ use burn::tensor::backend::Backend;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Metadata saved alongside model checkpoints for DQN-specific state
+/// Current checkpoint format version
+pub const CHECKPOINT_VERSION: u32 = 2;
+
+/// Unified checkpoint metadata for all policy types.
+/// Replaces the three divergent CheckpointMetadata structs.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CheckpointMetadata {
+    /// Policy type identifier (e.g., "DQN", "Bandit", "Combined")
+    pub policy_type: String,
+    /// Checkpoint format version for backward compatibility
+    pub version: u32,
+    /// Creation timestamp (ISO 8601)
+    pub created_at: String,
+    /// Training epoch
     pub epoch: usize,
+    /// Total training steps completed
     pub step_count: usize,
+    /// Total episodes completed
+    pub episode_count: Option<usize>,
+    /// Exploration parameter (epsilon for DQN, etc.)
     pub epsilon: f32,
-    pub best_reward: f32,
-    pub avg_reward_10: f32,
-    pub timestamp: String,
-    /// Model architecture dimensions for compatibility checking
+    /// Best reward seen during training
+    pub best_reward: Option<f32>,
+    /// Average reward over last N episodes
+    pub avg_reward: Option<f32>,
+    /// Model architecture dimensions (for compatibility checking)
     pub state_dim: Option<usize>,
     pub action_dim: Option<usize>,
     pub feature_dim: Option<usize>,
+    /// Model configuration as JSON (for reconstruction)
+    pub model_config: Option<serde_json::Value>,
 }
 
 impl CheckpointMetadata {
-    pub fn new(
-        epoch: usize,
-        step_count: usize,
-        epsilon: f32,
-        best_reward: f32,
-        avg_reward_10: f32,
-    ) -> Self {
+    /// Create new metadata with defaults
+    pub fn new(policy_type: String, epoch: usize, model_config: serde_json::Value) -> Self {
         Self {
+            policy_type,
+            version: CHECKPOINT_VERSION,
+            created_at: chrono::Utc::now().to_rfc3339(),
             epoch,
-            step_count,
-            epsilon,
-            best_reward,
-            avg_reward_10,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            step_count: 0,
+            episode_count: None,
+            epsilon: 1.0,
+            best_reward: None,
+            avg_reward: None,
             state_dim: None,
             action_dim: None,
             feature_dim: None,
+            model_config: Some(model_config),
         }
     }
 
-    /// Create new metadata with model dimensions for checkpoint compatibility checking
+    /// Create new metadata with dimension info
     pub fn new_with_dims(
+        policy_type: String,
         epoch: usize,
-        step_count: usize,
-        epsilon: f32,
-        best_reward: f32,
-        avg_reward_10: f32,
         state_dim: usize,
         action_dim: usize,
         feature_dim: usize,
     ) -> Self {
         Self {
+            policy_type,
+            version: CHECKPOINT_VERSION,
+            created_at: chrono::Utc::now().to_rfc3339(),
             epoch,
-            step_count,
-            epsilon,
-            best_reward,
-            avg_reward_10,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            step_count: 0,
+            episode_count: None,
+            epsilon: 1.0,
+            best_reward: None,
+            avg_reward: None,
             state_dim: Some(state_dim),
             action_dim: Some(action_dim),
             feature_dim: Some(feature_dim),
+            model_config: None,
         }
     }
 
@@ -120,21 +138,170 @@ impl CheckpointMetadata {
     }
 }
 
-/// Helper functions for checkpoint management using Burn's recorders.
+/// Trait for models and policies that can be checkpointed.
 ///
-/// Uses Burn's `NamedMpkFileRecorder` for model persistence, wrapped with
-/// DQN-specific metadata storage.
+/// This trait provides metadata for checkpointing. The actual
+/// save/load mechanics are handled by generic functions that work
+/// with Burn modules.
+///
+/// For policies that wrap models, implement this trait to provide
+/// metadata, and use the model's Module implementation for save/load.
+pub trait Checkpointable<B: Backend> {
+    /// Return the checkpoint name for this model type.
+    /// Used to construct checkpoint file paths.
+    ///
+    /// Example: "q_network", "contextual_bandit", "combined_model"
+    fn checkpoint_name(&self) -> &str;
+
+    /// Return metadata describing the current state of this model.
+    ///
+    /// The training loop should update fields like step_count,
+    /// episode_count, epsilon, best_reward with actual values.
+    fn checkpoint_metadata(&self) -> CheckpointMetadata;
+
+    /// Return a reference to the underlying model for checkpointing.
+    ///
+    /// For policies that wrap models, this returns the model.
+    /// For models themselves, this returns self.
+    fn model(&self) -> &impl Module<B>;
+}
+
+/// Extension trait for updating checkpoint metadata with training state.
+pub trait CheckpointMetadataExt {
+    /// Update metadata with actual training state.
+    fn with_training_state(
+        self,
+        step_count: usize,
+        episode_count: usize,
+        epsilon: f32,
+        best_reward: f32,
+    ) -> Self;
+}
+
+impl CheckpointMetadataExt for CheckpointMetadata {
+    fn with_training_state(
+        mut self,
+        step_count: usize,
+        episode_count: usize,
+        epsilon: f32,
+        best_reward: f32,
+    ) -> Self {
+        self.step_count = step_count;
+        self.epoch = episode_count;
+        self.epsilon = epsilon;
+        self.best_reward = Some(best_reward);
+        self
+    }
+}
+
+/// Generic save function for any Burn module.
+pub fn save_checkpoint<B, M>(
+    model: &M,
+    directory: impl AsRef<Path>,
+    name: &str,
+    epoch: usize,
+    metadata: &CheckpointMetadata,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>>
+where
+    B: Backend,
+    M: Module<B> + Clone,
+{
+    let directory = directory.as_ref();
+    validate_checkpoint_path(directory, name)?;
+    std::fs::create_dir_all(directory)?;
+
+    let model_path = directory.join(format!("{}-{}.mpk", name, epoch));
+    let meta_path = directory.join(format!("{}-{}.json", name, epoch));
+
+    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+    model.clone().save_file(&model_path, &recorder)?;
+    std::fs::write(&meta_path, serde_json::to_string_pretty(metadata)?)?;
+
+    if !model_path.exists() {
+        return Err(format!("Model file not created: {}", model_path.display()).into());
+    }
+    if !meta_path.exists() {
+        return Err(format!("Metadata file not created: {}", meta_path.display()).into());
+    }
+
+    log::info!(
+        "[STAGE:checkpoint_saved] {} (epoch {})",
+        model_path.display(),
+        epoch
+    );
+
+    Ok(model_path)
+}
+
+/// Validate checkpoint path for security.
+fn validate_checkpoint_path(
+    directory: &Path,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if directory
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("Checkpoint directory contains '..' (path traversal not allowed)".into());
+    }
+
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err("Checkpoint name contains invalid characters".into());
+    }
+
+    Ok(())
+}
+
+/// Load a checkpoint for any Burn module.
+pub fn load_checkpoint<B, M>(
+    directory: impl AsRef<Path>,
+    name: &str,
+    epoch: usize,
+    device: &B::Device,
+    config: impl FnOnce() -> M,
+) -> Result<(M, CheckpointMetadata), Box<dyn std::error::Error>>
+where
+    B: Backend,
+    M: Module<B>,
+{
+    let directory = directory.as_ref();
+    validate_checkpoint_path(directory, name)?;
+
+    let model_path = directory.join(format!("{}-{}.mpk", name, epoch));
+    let meta_path = directory.join(format!("{}-{}.json", name, epoch));
+
+    if !model_path.exists() {
+        return Err(format!("Checkpoint not found: {}", model_path.display()).into());
+    }
+
+    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+    let model = config().load_file(&model_path, &recorder, device)?;
+
+    let metadata: CheckpointMetadata = if meta_path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?
+    } else {
+        log::warn!(
+            "[STAGE:checkpoint_warning] Metadata not found for epoch {}, using defaults",
+            epoch
+        );
+        CheckpointMetadata::default()
+    };
+
+    log::info!(
+        "[STAGE:checkpoint_loaded] {} (epoch {})",
+        model_path.display(),
+        epoch
+    );
+
+    Ok((model, metadata))
+}
+
+/// Helper functions for checkpoint management using Burn's recorders.
 pub struct DQNCheckpointHelper;
 
 impl DQNCheckpointHelper {
     /// Save model with metadata using Burn's recorder.
-    ///
-    /// # Arguments
-    /// * `model` - Model to save (must implement Module)
-    /// * `directory` - Save directory
-    /// * `name` - Base name for checkpoint
-    /// * `epoch` - Training epoch/episode
-    /// * `metadata` - DQN-specific metadata
+    #[deprecated(since = "0.1.0", note = "Use save_checkpoint() instead")]
     pub fn save<B: Backend, M: Module<B>>(
         model: &M,
         directory: impl AsRef<Path>,
@@ -142,81 +309,12 @@ impl DQNCheckpointHelper {
         epoch: usize,
         metadata: &CheckpointMetadata,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let directory = directory.as_ref();
-        std::fs::create_dir_all(directory)?;
-
-        // Create fresh recorder instance for each save
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-
-        // Burn's NamedMpkFileRecorder expects path WITHOUT extension
-        // It will append .mpk automatically
-        // Format: "{name}-{epoch}" becomes "{name}-{epoch}.mpk"
-        let file_path = directory.join(format!("{}-{}", name, epoch));
-
-        tracing::debug!(
-            "Attempting to save model to: {} (epoch {})",
-            file_path.display(),
-            epoch
-        );
-
-        // Save model using Burn's recorder
-        model
-            .clone()
-            .save_file(&file_path, &recorder)
-            .map_err(|e| format!("Failed to save model to {}: {:?}", file_path.display(), e))?;
-
-        // Verify the .mpk file was created
-        let mpk_path = directory.join(format!("{}-{}.mpk", name, epoch));
-        if !mpk_path.exists() {
-            // Try to list what files ARE in the directory for debugging
-            let files: Vec<_> = std::fs::read_dir(directory)
-                .map_err(|e| format!("Failed to read directory: {:?}", e))?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path().display().to_string())
-                .collect();
-
-            return Err(format!(
-                "Model file was not created at: {}. Files in directory: {:?}",
-                mpk_path.display(),
-                files
-            )
-            .into());
-        }
-
-        // Save metadata
-        let meta_path = directory.join(format!("{}-{}.json", name, epoch));
-        let json = serde_json::to_string_pretty(metadata)?;
-        std::fs::write(&meta_path, json)?;
-
-        // Verify metadata file was created
-        if !meta_path.exists() {
-            return Err(format!("Metadata file was not created: {}", meta_path.display()).into());
-        }
-
-        tracing::info!(
-            "Checkpoint saved successfully: {} (epoch {}) - verified files exist",
-            name,
-            epoch
-        );
-
-        // Force sync to ensure files are visible
-        if let Err(e) = std::fs::File::open(&mpk_path) {
-            tracing::warn!("Could not re-open checkpoint file for verification: {}", e);
-        }
-
+        save_checkpoint::<B, M>(model, directory, name, epoch, metadata)?;
         Ok(())
     }
 
     /// Load model with metadata using Burn's recorder.
-    ///
-    /// # Arguments
-    /// * `directory` - Checkpoint directory
-    /// * `name` - Base name for checkpoint
-    /// * `epoch` - Checkpoint epoch to load
-    /// * `device` - Device to load onto
-    ///
-    /// # Returns
-    /// Tuple of (model, metadata)
+    #[deprecated(since = "0.1.0", note = "Use load_checkpoint() instead")]
     pub fn load<B: Backend, M: Module<B>>(
         directory: impl AsRef<Path>,
         name: &str,
@@ -224,36 +322,10 @@ impl DQNCheckpointHelper {
         device: &B::Device,
         config: impl FnOnce() -> M,
     ) -> Result<(M, CheckpointMetadata), Box<dyn std::error::Error>> {
-        let directory = directory.as_ref();
-
-        // Create recorder and path
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-        let file_path = directory.join(format!("{}-{}", name, epoch));
-
-        // Load model using Burn's recorder
-        let model = config()
-            .load_file(&file_path, &recorder, device)
-            .map_err(|e| format!("Failed to load model: {:?}", e))?;
-
-        // Load metadata
-        let meta_path = directory.join(format!("{}-{}.json", name, epoch));
-        let metadata = if meta_path.exists() {
-            let json = std::fs::read_to_string(&meta_path)?;
-            serde_json::from_str(&json)?
-        } else {
-            tracing::warn!("No metadata found for epoch {}, using defaults", epoch);
-            CheckpointMetadata::default()
-        };
-
-        tracing::info!(
-            "Checkpoint loaded: {} (epoch {})",
-            file_path.display(),
-            epoch
-        );
-        Ok((model, metadata))
+        load_checkpoint::<B, M>(directory, name, epoch, device, config)
     }
 
-    /// Delete checkpoint files
+    /// Delete checkpoint files.
     pub fn delete(
         directory: impl AsRef<Path>,
         name: &str,
@@ -261,13 +333,11 @@ impl DQNCheckpointHelper {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = directory.as_ref();
 
-        // Delete model file
         let model_path = directory.join(format!("{}-{}.mpk", name, epoch));
         if model_path.exists() {
             std::fs::remove_file(&model_path)?;
         }
 
-        // Delete metadata file
         let meta_path = directory.join(format!("{}-{}.json", name, epoch));
         if meta_path.exists() {
             std::fs::remove_file(&meta_path)?;

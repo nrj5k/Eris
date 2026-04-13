@@ -14,6 +14,8 @@
 use burn::tensor::TensorData;
 use clap::{Parser, ValueEnum};
 use eris::device::{available_backends, Device};
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 use eris::training::CombinedAgent;
 use std::path::PathBuf;
@@ -41,6 +43,16 @@ enum ExplorationStrategy {
     ThompsonSampling,
     /// Upper Confidence Bound: theoretically optimal exploration
     Ucb,
+}
+
+/// Logging verbosity level
+#[derive(Clone, Debug, ValueEnum)]
+enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
 }
 
 /// Validate batch size is a multiple of 32 and within reasonable bounds
@@ -143,6 +155,10 @@ struct Args {
     /// Use CLI override: --num_workers 4 for CPU-heavy preprocessing.
     #[arg(long, default_value = "2")]
     num_workers: usize,
+
+    /// Logging verbosity level
+    #[arg(long, value_enum, default_value = "info")]
+    log_level: LogLevel,
 }
 
 // ============================================================================
@@ -173,6 +189,17 @@ fn create_exploration_config(args: &Args) -> eris::policies::ExplorationConfig {
 
 fn main() {
     let args = Args::parse();
+
+    // Initialize logging with user-specified level
+    let level = match args.log_level {
+        LogLevel::Trace => Level::TRACE,
+        LogLevel::Debug => Level::DEBUG,
+        LogLevel::Info => Level::INFO,
+        LogLevel::Warn => Level::WARN,
+        LogLevel::Error => Level::ERROR,
+    };
+    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     // Validate config file exists
     if !args.config.exists() {
@@ -208,40 +235,42 @@ fn main() {
     println!("Using backend: {}", device.name());
 
     // GPU DIAGNOSTIC: Verify compiled backend features
-    println!("🔍 GPU DIAGNOSTIC: Compiled features:");
+    tracing::debug!("[STAGE:DIAG] GPU DIAGNOSTIC: Compiled features:");
     #[cfg(feature = "cuda")]
-    println!("  ✅ cuda feature: ENABLED");
+    tracing::debug!("  [STAGE:OK] cuda feature: ENABLED");
     #[cfg(not(feature = "cuda"))]
-    println!("  ❌ cuda feature: DISABLED (binary compiled without CUDA support!)");
+    tracing::error!(
+        "  [STAGE:FAIL] cuda feature: DISABLED (binary compiled without CUDA support!)"
+    );
     #[cfg(feature = "wgpu")]
-    println!("  ✅ wgpu feature: ENABLED");
+    tracing::debug!("  [STAGE:OK] wgpu feature: ENABLED");
     #[cfg(not(feature = "wgpu"))]
-    println!("  ⚠️  wgpu feature: DISABLED");
+    tracing::info!("  [STAGE:WARN]  wgpu feature: DISABLED");
     #[cfg(feature = "cpu")]
-    println!("  ✅ cpu feature: ENABLED");
+    tracing::debug!("  [STAGE:OK] cpu feature: ENABLED");
     #[cfg(not(feature = "cpu"))]
-    println!("  ⚠️  cpu feature: DISABLED");
+    tracing::info!("  [STAGE:WARN]  cpu feature: DISABLED");
 
     // GPU DIAGNOSTIC: Show which Device variant was selected at runtime
     match &device {
         #[cfg(feature = "cuda")]
-        Device::Cuda(ref dev) => println!(
-            "🔍 GPU DIAGNOSTIC: Device::Cuda variant selected - CUDA device: {:?}",
+        Device::Cuda(ref dev) => tracing::debug!(
+            "[STAGE:DIAG] GPU DIAGNOSTIC: Device::Cuda variant selected - CUDA device: {:?}",
             dev
         ),
         #[cfg(feature = "wgpu")]
-        Device::Wgpu(ref dev) => println!(
-            "🔍 GPU DIAGNOSTIC: Device::Wgpu variant selected - WGPU device: {:?}",
+        Device::Wgpu(ref dev) => tracing::debug!(
+            "[STAGE:DIAG] GPU DIAGNOSTIC: Device::Wgpu variant selected - WGPU device: {:?}",
             dev
         ),
         #[cfg(feature = "cpu")]
-        Device::Cpu(ref dev) => println!(
-            "🔍 GPU DIAGNOSTIC: Device::Cpu variant selected - CPU device: {:?}",
+        Device::Cpu(ref dev) => tracing::debug!(
+            "[STAGE:DIAG] GPU DIAGNOSTIC: Device::Cpu variant selected - CPU device: {:?}",
             dev
         ),
         #[cfg(feature = "rocm")]
-        Device::Rocm(ref dev) => println!(
-            "🔍 GPU DIAGNOSTIC: Device::Rocm variant selected - ROCm device: {:?}",
+        Device::Rocm(ref dev) => tracing::debug!(
+            "[STAGE:DIAG] GPU DIAGNOSTIC: Device::Rocm variant selected - ROCm device: {:?}",
             dev
         ),
     }
@@ -352,15 +381,18 @@ fn train_model_generic(args: &Args, device: Device) -> Result<(), String> {
                 use burn::backend::{Autodiff, Cuda};
                 type Backend = Autodiff<Cuda<f32, i32>>;
 
-                // 🔥 DEBUG: DQN CUDA PATH ACTIVE
-                eprintln!("🔥 DQN CUDA PATH ACTIVE 🔥");
-                eprintln!("🔥 Backend type: {}", std::any::type_name::<Backend>());
-                eprintln!("🔥 CUDA device: {:?}", cuda_device);
+                // [STAGE:CRITICAL] DEBUG: DQN CUDA PATH ACTIVE
+                tracing::trace!("[STAGE:CRITICAL] DQN CUDA PATH ACTIVE [STAGE:CRITICAL]");
+                tracing::trace!(
+                    "[STAGE:CRITICAL] Backend type: {}",
+                    std::any::type_name::<Backend>()
+                );
+                tracing::trace!("[STAGE:CRITICAL] CUDA device: {:?}", cuda_device);
 
                 println!("Running DQN on CUDA");
                 // GPU DIAGNOSTIC: Verify the Backend type at compile time
-                println!(
-                    "🔍 GPU DIAGNOSTIC: Backend type = {}",
+                tracing::debug!(
+                    "[STAGE:DIAG] GPU DIAGNOSTIC: Backend type = {}",
                     std::any::type_name::<Backend>()
                 );
                 // Quick sanity check: time a small tensor operation
@@ -369,8 +401,8 @@ fn train_model_generic(args: &Args, device: Device) -> Result<(), String> {
                     burn::tensor::Tensor::<Backend, 2>::zeros([64, 128], &cuda_device);
                 let _ = _test_tensor.into_data(); // Force GPU sync
                 let diag_elapsed = diag_start.elapsed();
-                println!(
-                    "🔍 GPU DIAGNOSTIC: Zero tensor [64,128] + sync: {:?} (GPU<1ms, CPU>5ms)",
+                tracing::debug!(
+                    "[STAGE:DIAG] GPU DIAGNOSTIC: Zero tensor [64,128] + sync: {:?} (GPU<1ms, CPU>5ms)",
                     diag_elapsed
                 );
                 run_dqn_training::<Backend>(args, cuda_device, exploration.clone())
@@ -614,7 +646,7 @@ fn run_training_vecenv<B: burn::tensor::backend::AutodiffBackend>(
             if result.done {
                 // Print episode completion with reward
                 println!(
-                    "✓ Episode {} completed: reward={:.2}, steps={}, env={}",
+                    "[STAGE:OK] Episode {} completed: reward={:.2}, steps={}, env={}",
                     episode_count + 1,
                     env_cumulative_rewards[i],
                     env_steps[i],
@@ -646,8 +678,8 @@ fn run_training_vecenv<B: burn::tensor::backend::AutodiffBackend>(
         let warmup_threshold = agent.warmup_batch_size;
         if !agent.warmup_complete && buffer_len < warmup_threshold {
             if total_steps % 100 == 0 {
-                println!(
-                    "⏳ Warming up: {}/{} samples ({:.1}%) - training starts at {}",
+                tracing::info!(
+                    "[STAGE:TIME] Warming up: {}/{} samples ({:.1}%) - training starts at {}",
                     buffer_len,
                     warmup_threshold,
                     100.0 * buffer_len as f32 / warmup_threshold as f32,
@@ -674,9 +706,11 @@ fn run_training_vecenv<B: burn::tensor::backend::AutodiffBackend>(
             let avg_loss = total_loss / train_steps as f32;
             let avg_reward =
                 episode_rewards.iter().sum::<f64>() / episode_rewards.len().max(1) as f64;
-            println!(
-                "📊 Training: avg_loss={:.4}, avg_reward={:.2}, epsilon={:.3}",
-                avg_loss, avg_reward, agent.epsilon
+            tracing::info!(
+                "[STAGE:STATS] Training: avg_loss={:.4}, avg_reward={:.2}, epsilon={:.3}",
+                avg_loss,
+                avg_reward,
+                agent.epsilon
             );
         }
 
@@ -689,8 +723,8 @@ fn run_training_vecenv<B: burn::tensor::backend::AutodiffBackend>(
                 0.0
             };
 
-            println!(
-                "⏱️  Steps: {} total ({} per env) | Episodes: {}/{} | Avg Reward: {:.2} | ε: {:.3} | Buffer: {}/{}",
+            tracing::info!(
+                "[STAGE:TIME]  Steps: {} total ({} per env) | Episodes: {}/{} | Avg Reward: {:.2} | ε: {:.3} | Buffer: {}/{}",
                 total_steps,
                 steps_per_env,
                 episode_count,
@@ -946,7 +980,7 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
             let checkpoint_path = format!("checkpoints/metis_episode_{}", episode + 1);
             save_checkpoint(&agent, &checkpoint_path, episode + 1, avg_reward as f32)
                 .map_err(|e| format!("Failed to save checkpoint: {}", e))?;
-            println!("  Saved checkpoint: {}.mpk", checkpoint_path);
+            tracing::info!("  [STAGE:SAVE] Saved checkpoint: {}.mpk", checkpoint_path);
         }
     }
 
@@ -1257,11 +1291,22 @@ fn run_catcher_training<B: burn::tensor::backend::AutodiffBackend>(
     println!("State dim: {}", state_dim);
     println!("Action dim: {}", action_dim);
 
-    // Create Catcher policy with custom buffer capacity
+    // Create Catcher policy with custom buffer capacity and dimensions from environment
     let mut policy = CatcherPolicy::<B>::with_config(
         device.clone(),
         args.buffer_capacity,
-        100, // target_update_freq
+        state_dim,  // from environment observation space
+        action_dim, // from environment action space
+        100,        // target_update_freq
+    );
+
+    // Validate dimensions match environment
+    assert_eq!(
+        policy.state_dim(),
+        state_dim,
+        "Policy state_dim {} != environment observation_dim {}",
+        policy.state_dim(),
+        state_dim
     );
 
     println!("Catcher policy initialized!");
@@ -1306,7 +1351,7 @@ fn run_catcher_training<B: burn::tensor::backend::AutodiffBackend>(
 
     // Print final metrics
     println!("\n{}", "=".repeat(60));
-    println!("🏁 Catcher Training Complete!");
+    tracing::info!("[STAGE:DONE] Catcher Training Complete!");
     println!("{}", "=".repeat(60));
     println!("Total episodes: {}", metrics.total_episodes);
     println!(
@@ -1383,7 +1428,7 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
     let effective_buffer_capacity = if state_dim > 20 {
         let adjusted = (args.buffer_capacity / 2).max(10000); // Minimum 10k
         println!(
-            "⚠️  State dimension {} > 20, reducing buffer capacity: {} → {} (for GPU memory safety)",
+            "[STAGE:WARN]  State dimension {} > 20, reducing buffer capacity: {} → {} (for GPU memory safety)",
             state_dim, args.buffer_capacity, adjusted
         );
         adjusted
@@ -1394,7 +1439,7 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
     // Calculate estimated GPU memory usage
     let buffer_mem_mb = (effective_buffer_capacity * state_dim * 4 * 2) / (1024 * 1024); // ×2 for states + next_states
     println!(
-        "📊 Estimated GPU buffer memory: ~{} MB (capacity={}, state_dim={})",
+        "[STAGE:STATS] Estimated GPU buffer memory: ~{} MB (capacity={}, state_dim={})",
         buffer_mem_mb, effective_buffer_capacity, state_dim
     );
 
@@ -1428,38 +1473,46 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
     // GPU DIAGNOSTIC: Verify training will actually use GPU
     {
         let backend_name = std::any::type_name::<B>();
-        println!("🔍 GPU DIAGNOSTIC: Policy backend type = {}", backend_name);
+        tracing::debug!(
+            "[STAGE:DIAG] GPU DIAGNOSTIC: Policy backend type = {}",
+            backend_name
+        );
         if backend_name.contains("NdArray") {
-            println!(
-                "❌ GPU DIAGNOSTIC ERROR: Backend is NdArray (CPU)! Training will happen on CPU!"
+            tracing::error!(
+                "[STAGE:FAIL] GPU DIAGNOSTIC ERROR: Backend is NdArray (CPU)! Training will happen on CPU!"
             );
-            println!(
+            tracing::error!(
                 "   → This means the CUDA path was NOT taken despite selecting --backend cuda"
             );
         } else if backend_name.contains("Cuda") {
-            println!("✅ GPU DIAGNOSTIC: Backend is CUDA! Training should happen on GPU.");
+            tracing::debug!(
+                "[STAGE:OK] GPU DIAGNOSTIC: Backend is CUDA! Training should happen on GPU."
+            );
         } else if backend_name.contains("Wgpu") {
-            println!(
-                "⚠️  GPU DIAGNOSTIC: Backend is WGPU (WebGPU). May work but CUDA is preferred."
+            tracing::info!(
+                "[STAGE:WARN]  GPU DIAGNOSTIC: Backend is WGPU (WebGPU). May work but CUDA is preferred."
             );
         } else {
-            println!("⚠️  GPU DIAGNOSTIC: Unknown backend type: {}", backend_name);
+            tracing::info!(
+                "[STAGE:WARN]  GPU DIAGNOSTIC: Unknown backend type: {}",
+                backend_name
+            );
         }
 
         // Benchmark: run tensor operations to verify GPU is actually used
         use burn::tensor::Tensor;
-        println!("🔍 GPU DIAGNOSTIC: Benchmarking tensor operations on device...");
+        tracing::debug!("[STAGE:DIAG] GPU DIAGNOSTIC: Benchmarking tensor operations on device...");
 
         // Test 1: Create and sync a zero tensor
         let bench_start1 = std::time::Instant::now();
         let test_zeros = Tensor::<B, 2>::zeros([64, 128], &device);
         let _ = test_zeros.into_data(); // Force sync
         let bench_elapsed1 = bench_start1.elapsed();
-        println!(
-            "🔍 GPU DIAGNOSTIC: Zero tensor [64,128] + sync: {:?}",
+        tracing::debug!(
+            "[STAGE:DIAG] GPU DIAGNOSTIC: Zero tensor [64,128] + sync: {:?}",
             bench_elapsed1
         );
-        println!("   → GPU: <1ms | CPU: 1-5ms");
+        tracing::trace!("   → GPU: <1ms | CPU: 1-5ms");
 
         // Test 2: Create a random tensor and compute
         let bench_start2 = std::time::Instant::now();
@@ -1471,11 +1524,12 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
         let test_result = test_random.clone() * test_random; // Element-wise multiply
         let _ = test_result.into_data(); // Force sync
         let bench_elapsed2 = bench_start2.elapsed();
-        println!(
-            "🔍 GPU DIAGNOSTIC: Random tensor [256,{}] + multiply + sync: {:?}",
-            state_dim, bench_elapsed2
+        tracing::debug!(
+            "[STAGE:DIAG] GPU DIAGNOSTIC: Random tensor [256,{}] + multiply + sync: {:?}",
+            state_dim,
+            bench_elapsed2
         );
-        println!("   → GPU: <5ms | CPU: 5-50ms");
+        tracing::trace!("   → GPU: <5ms | CPU: 5-50ms");
 
         // Test 3: Large matmul-like operation
         let bench_start3 = std::time::Instant::now();
@@ -1495,11 +1549,11 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
         }
         let _ = result.into_data(); // Force sync
         let bench_elapsed3 = bench_start3.elapsed();
-        println!(
-            "🔍 GPU DIAGNOSTIC: [2048x128] x [128x128] matmul x10 + sync: {:?}",
+        tracing::debug!(
+            "[STAGE:DIAG] GPU DIAGNOSTIC: [2048x128] x [128x128] matmul x10 + sync: {:?}",
             bench_elapsed3
         );
-        println!("   → GPU: <50ms | CPU: 500-5000ms");
+        tracing::trace!("   → GPU: <50ms | CPU: 500-5000ms");
     }
 
     // Create training coordinator with configuration
@@ -1529,7 +1583,7 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
 
     // Print final metrics
     println!("\n{}", "=".repeat(60));
-    println!("🏁 Training Complete!");
+    tracing::info!("[STAGE:DONE] Training Complete!");
     println!("{}", "=".repeat(60));
     println!("Total episodes: {}", metrics.total_episodes);
     println!(
