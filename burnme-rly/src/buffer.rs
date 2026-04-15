@@ -42,7 +42,7 @@ use rand::rng;
 use std::collections::VecDeque;
 
 /// Single transition tuple (s, a, r, s', done)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Transition {
     /// Current observation state
     pub state: Vec<f32>,
@@ -336,6 +336,48 @@ impl CpuRingBuffer {
         self.size = (self.size + 1).min(self.capacity);
     }
 
+    /// Push a batch of transitions efficiently.
+    ///
+    /// More efficient than calling `push()` N times due to reduced method call overhead.
+    /// For `CpuRingBuffer`, this is primarily for API consistency with `GpuRingBuffer`.
+    /// The actual push is still O(1) per transition.
+    ///
+    /// # Arguments
+    ///
+    /// * `transitions` - Vector of transitions to push
+    ///
+    /// # Performance
+    ///
+    /// - Time: O(n) where n is the number of transitions
+    /// - Memory: No extra allocation beyond individual pushes
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use burnme_rly::buffer::{CpuRingBuffer, Transition};
+    ///
+    /// let mut buffer = CpuRingBuffer::new(1000);
+    ///
+    /// let transitions = vec![
+    ///     Transition::new(vec![1.0, 2.0], 0, 0.5, vec![1.1, 2.1], false),
+    ///     Transition::new(vec![3.0, 4.0], 1, -0.3, vec![3.1, 4.1], true),
+    /// ];
+    ///
+    /// buffer.push_batch(transitions);
+    /// assert_eq!(buffer.len(), 2);
+    /// ```
+    pub fn push_batch(&mut self, transitions: Vec<Transition>) {
+        let count = transitions.len();
+        for transition in transitions {
+            self.push(transition);
+        }
+
+        log::trace!(
+            "[STAGE:DIAG] CpuRingBuffer: Pushed batch of {} transitions",
+            count
+        );
+    }
+
     /// Sample random i.i.d. batch of transitions using `rand::thread_rng()`.
     ///
     /// Returns `Some(Vec<Transition>)` with `batch_size` randomly sampled transitions.
@@ -499,6 +541,254 @@ impl CpuRingBuffer {
 impl Default for CpuRingBuffer {
     fn default() -> Self {
         Self::new(100_000) // Default: 100k capacity
+    }
+}
+
+// ==================== HybridRingBuffer: CPU Storage → GPU Batch ====================
+
+/// Hybrid ring buffer: stores transitions on CPU, converts to GPU only on sampling.
+///
+/// This follows the Metis proven pattern:
+/// 1. Store transitions as separate CPU vectors (no GPU memory during push)
+/// 2. Convert to GPU tensors only during sample_batch(), outputs rank-2 tensors
+/// 3. O(1) push — no GPU allocations during training
+/// 4. No VRAM leak — memory stays constant
+///
+/// # Architecture
+///
+/// - CPU storage: 5 separate vectors (states, actions, rewards, next_states, dones)
+/// - GPU conversion: only in sample_batch(), outputs rank-2 tensors
+/// - Ring buffer: overwrites oldest transitions when full
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use burnme_rly::buffer::HybridRingBuffer;
+/// use burn::backend::NdArray;
+///
+/// let mut buffer = HybridRingBuffer::<NdArray>::new(10_000, 32);
+///
+/// buffer.push(vec![1.0; 32], 0, 0.5, vec![2.0; 32], false);
+///
+/// if let Some(batch) = buffer.sample_batch(32, &device) {
+///     // batch.states: [32, 32], batch.actions: [32, 1], etc.
+/// }
+/// ```
+pub struct HybridRingBuffer<B: Backend> {
+    states: Vec<Vec<f32>>,
+    actions: Vec<usize>,
+    rewards: Vec<f32>,
+    next_states: Vec<Vec<f32>>,
+    dones: Vec<bool>,
+
+    head: usize,
+    size: usize,
+    capacity: usize,
+    state_dim: usize,
+    _phantom: std::marker::PhantomData<B>,
+}
+
+impl<B: Backend> HybridRingBuffer<B> {
+    /// Create a new hybrid ring buffer with CPU storage.
+    pub fn new(capacity: usize, state_dim: usize) -> Self {
+        Self {
+            states: Vec::with_capacity(capacity),
+            actions: Vec::with_capacity(capacity),
+            rewards: Vec::with_capacity(capacity),
+            next_states: Vec::with_capacity(capacity),
+            dones: Vec::with_capacity(capacity),
+            head: 0,
+            size: 0,
+            capacity,
+            state_dim,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Push a single transition — O(1), no GPU allocations.
+    pub fn push(
+        &mut self,
+        state: Vec<f32>,
+        action: usize,
+        reward: f32,
+        next_state: Vec<f32>,
+        done: bool,
+    ) {
+        if self.states.len() < self.capacity {
+            self.states.push(state);
+            self.actions.push(action);
+            self.rewards.push(reward);
+            self.next_states.push(next_state);
+            self.dones.push(done);
+        } else {
+            self.states[self.head] = state;
+            self.actions[self.head] = action;
+            self.rewards[self.head] = reward;
+            self.next_states[self.head] = next_state;
+            self.dones[self.head] = done;
+        }
+        self.head = (self.head + 1) % self.capacity;
+        self.size = (self.size + 1).min(self.capacity);
+    }
+
+    /// Push a batch of transitions efficiently.
+    pub fn push_batch(
+        &mut self,
+        states: Vec<Vec<f32>>,
+        actions: Vec<usize>,
+        rewards: Vec<f32>,
+        next_states: Vec<Vec<f32>>,
+        dones: Vec<bool>,
+    ) {
+        let batch_size = states.len();
+        for i in 0..batch_size {
+            self.push(
+                states[i].clone(),
+                actions[i],
+                rewards[i],
+                next_states[i].clone(),
+                dones[i],
+            );
+        }
+        log::trace!(
+            "[STAGE:DIAG] HybridRingBuffer: Pushed batch of {} transitions",
+            batch_size
+        );
+    }
+
+    /// Sample a random batch and convert to GPU tensors.
+    ///
+    /// Returns `Some(TensorTransitionBatch)` if enough samples, `None` otherwise.
+    /// Creates rank-2 tensors: states [batch, state_dim], actions [batch, 1], etc.
+    pub fn sample_batch(
+        &self,
+        batch_size: usize,
+        device: &B::Device,
+    ) -> Option<TensorTransitionBatch<B>> {
+        if self.size < batch_size {
+            return None;
+        }
+
+        use rand::prelude::IteratorRandom;
+        let mut rng = rand::rng();
+        let indices: Vec<usize> = (0..self.size).sample(&mut rng, batch_size);
+        if indices.len() < batch_size {
+            return None;
+        }
+
+        // Gather samples from CPU storage
+        let mut batch_states = Vec::with_capacity(batch_size * self.state_dim);
+        let mut batch_actions = Vec::with_capacity(batch_size);
+        let mut batch_rewards = Vec::with_capacity(batch_size);
+        let mut batch_next_states = Vec::with_capacity(batch_size * self.state_dim);
+        let mut batch_dones = Vec::with_capacity(batch_size);
+
+        for &idx in &indices {
+            batch_states.extend_from_slice(&self.states[idx]);
+            batch_actions.push(self.actions[idx] as i32);
+            batch_rewards.push(self.rewards[idx]);
+            batch_next_states.extend_from_slice(&self.next_states[idx]);
+            batch_dones.push(if self.dones[idx] { 1.0f32 } else { 0.0f32 });
+        }
+
+        // Convert to rank-2 GPU tensors
+        let states = Tensor::from_data(
+            TensorData::new(batch_states, [batch_size, self.state_dim]).convert::<f32>(),
+            device,
+        );
+        let actions = Tensor::from_data(
+            TensorData::new(batch_actions, [batch_size, 1]).convert::<i32>(),
+            device,
+        );
+        let rewards = Tensor::from_data(
+            TensorData::new(batch_rewards, [batch_size, 1]).convert::<f32>(),
+            device,
+        );
+        let next_states = Tensor::from_data(
+            TensorData::new(batch_next_states, [batch_size, self.state_dim]).convert::<f32>(),
+            device,
+        );
+        let dones = Tensor::from_data(
+            TensorData::new(batch_dones, [batch_size, 1]).convert::<f32>(),
+            device,
+        );
+
+        Some(TensorTransitionBatch {
+            states,
+            actions,
+            rewards,
+            next_states,
+            dones,
+        })
+    }
+
+    /// Get buffer length.
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
+    /// Check if buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    /// Get buffer capacity.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Check if buffer is full.
+    pub fn is_full(&self) -> bool {
+        self.size == self.capacity
+    }
+
+    /// Get state dimension.
+    pub fn state_dim(&self) -> usize {
+        self.state_dim
+    }
+
+    /// Check if we have enough samples.
+    pub fn can_sample(&self, batch_size: usize) -> bool {
+        self.size >= batch_size
+    }
+
+    /// Clear the buffer.
+    pub fn clear(&mut self) {
+        self.head = 0;
+        self.size = 0;
+        self.states.clear();
+        self.actions.clear();
+        self.rewards.clear();
+        self.next_states.clear();
+        self.dones.clear();
+    }
+}
+
+impl<B: Backend> Clone for HybridRingBuffer<B> {
+    fn clone(&self) -> Self {
+        Self {
+            states: self.states.clone(),
+            actions: self.actions.clone(),
+            rewards: self.rewards.clone(),
+            next_states: self.next_states.clone(),
+            dones: self.dones.clone(),
+            head: self.head,
+            size: self.size,
+            capacity: self.capacity,
+            state_dim: self.state_dim,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<B: Backend> std::fmt::Debug for HybridRingBuffer<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HybridRingBuffer")
+            .field("capacity", &self.capacity)
+            .field("size", &self.size)
+            .field("state_dim", &self.state_dim)
+            .field("head", &self.head)
+            .finish_non_exhaustive()
     }
 }
 
@@ -2546,5 +2836,93 @@ mod tests {
         assert_eq!(batch.rewards.shape().dims, [256, 1]);
         assert_eq!(batch.next_states.shape().dims, [256, 64]);
         assert_eq!(batch.dones.shape().dims, [256, 1]);
+    }
+
+    // ==================== HybridRingBuffer Tests ====================
+
+    #[test]
+    fn test_hybrid_buffer_push_and_len() {
+        let mut buffer = HybridRingBuffer::<TestBackend>::new(100, 4);
+        buffer.push(
+            vec![1.0, 2.0, 3.0, 4.0],
+            0,
+            0.5,
+            vec![1.1, 2.1, 3.1, 4.1],
+            false,
+        );
+        buffer.push(
+            vec![5.0, 6.0, 7.0, 8.0],
+            1,
+            -0.3,
+            vec![5.1, 6.1, 7.1, 8.1],
+            true,
+        );
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.state_dim(), 4);
+        assert!(!buffer.is_full());
+    }
+
+    #[test]
+    fn test_hybrid_buffer_wraparound() {
+        let mut buffer = HybridRingBuffer::<TestBackend>::new(10, 4);
+        for i in 0..20 {
+            buffer.push(
+                vec![i as f32; 4],
+                i % 10,
+                i as f32,
+                vec![(i + 100) as f32; 4],
+                i % 3 == 0,
+            );
+        }
+        assert_eq!(buffer.len(), 10);
+        assert!(buffer.is_full());
+    }
+
+    #[test]
+    fn test_hybrid_buffer_sample_batch() {
+        let device = <TestBackend as burn::tensor::backend::Backend>::Device::default();
+        let mut buffer = HybridRingBuffer::<TestBackend>::new(100, 4);
+        for i in 0..50 {
+            buffer.push(
+                vec![i as f32; 4],
+                i % 10,
+                i as f32,
+                vec![(i + 1) as f32; 4],
+                false,
+            );
+        }
+        let batch = buffer.sample_batch(16, &device);
+        assert!(batch.is_some());
+        let batch = batch.unwrap();
+        assert_eq!(batch.batch_size(), 16);
+        assert_eq!(batch.state_dim(), 4);
+        // Check shapes are rank-2
+        assert_eq!(batch.states.shape().dims, [16, 4]);
+        assert_eq!(batch.actions.shape().dims, [16, 1]);
+    }
+
+    #[test]
+    fn test_hybrid_buffer_sample_none_when_empty() {
+        let device = <TestBackend as burn::tensor::backend::Backend>::Device::default();
+        let buffer = HybridRingBuffer::<TestBackend>::new(100, 4);
+        assert!(buffer.sample_batch(10, &device).is_none());
+    }
+
+    #[test]
+    fn test_hybrid_buffer_clear() {
+        let mut buffer = HybridRingBuffer::<TestBackend>::new(100, 4);
+        for i in 0..50 {
+            buffer.push(
+                vec![i as f32; 4],
+                i,
+                i as f32,
+                vec![(i + 1) as f32; 4],
+                false,
+            );
+        }
+        assert_eq!(buffer.len(), 50);
+        buffer.clear();
+        assert_eq!(buffer.len(), 0);
+        assert!(buffer.is_empty());
     }
 }

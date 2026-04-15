@@ -40,7 +40,7 @@ use std::error::Error;
 ///         &self.buffer
 ///     }
 ///     
-///     fn train_step_gpu_native(&mut self, steps_since_last_train: usize) -> Option<f32> {
+///     fn train_step_gpu_native(&mut self, steps_since_last_train: usize, device: &B::Device) -> Option<f32> {
 ///         // GPU-native training implementation
 ///         None
 ///     }
@@ -87,7 +87,7 @@ pub trait GpuTrainable<B: AutodiffBackend> {
     /// use burn::tensor::{backend::AutodiffBackend, Tensor, Int};
     ///
     /// impl<B: AutodiffBackend> MyPolicy<B> {
-    ///     fn train_step_gpu_native(&mut self, _steps: usize) -> Option<f32> {
+    ///     fn train_step_gpu_native(&mut self, _steps: usize, device: &B::Device) -> Option<f32> {
     ///         let batch_size = self.effective_batch_size();
     ///         
     ///         // 1. Sample from buffer (CPU → GPU conversion)
@@ -140,11 +140,16 @@ pub trait GpuTrainable<B: AutodiffBackend> {
     ///
     /// # Arguments
     /// * `steps_since_last_train` - Number of steps since last training
+    /// * `device` - GPU device for tensor operations (REQUIRED for GPU training)
     ///
     /// # Returns
     /// * `Some(loss)` if training occurred
     /// * `None` if training was skipped (e.g., during warmup, insufficient samples)
-    fn train_step_gpu_native(&mut self, steps_since_last_train: usize) -> Option<f32>;
+    fn train_step_gpu_native(
+        &mut self,
+        steps_since_last_train: usize,
+        device: &B::Device,
+    ) -> Option<f32>;
 
     /// Get the device for tensor operations.
     fn device(&self) -> &B::Device;
@@ -288,13 +293,16 @@ pub trait VecEnvironment {
     /// * `actions` - Action for each environment
     fn step_all(&mut self, actions: Vec<usize>) -> Result<Vec<StepResult>, Box<dyn Error>>;
 
-    /// Step all environments (parallel, if feature enabled).
+    /// Step all environments in parallel (default: falls back to sequential).
     ///
     /// # Arguments
     /// * `actions` - Action for each environment
-    #[cfg(feature = "parallel")]
-    fn step_all_parallel(&mut self, actions: Vec<usize>)
-        -> Result<Vec<StepResult>, Box<dyn Error>>;
+    fn step_all_parallel(
+        &mut self,
+        actions: Vec<usize>,
+    ) -> Result<Vec<StepResult>, Box<dyn Error>> {
+        self.step_all(actions)
+    }
 
     /// Reset environments that are done.
     ///
@@ -302,11 +310,13 @@ pub trait VecEnvironment {
     /// * `results` - Step results indicating which envs are done
     ///
     /// # Returns
-    /// New observations for reset environments
+    /// Vector of Option<Vec<f64>> where Some(obs) means the environment was reset
+    /// and None means it wasn't. Length equals num_envs, with each index corresponding
+    /// to the environment at that index.
     fn reset_done_environments(
         &mut self,
         results: &[StepResult],
-    ) -> Result<Vec<Vec<f64>>, Box<dyn Error>>;
+    ) -> Result<Vec<Option<Vec<f64>>>, Box<dyn Error>>;
 
     /// Get current observations after stepping.
     ///
@@ -314,7 +324,7 @@ pub trait VecEnvironment {
     fn get_current_observations(
         &self,
         results: &[StepResult],
-        reset_obs: &[Vec<f64>],
+        reset_obs: &[Option<Vec<f64>>],
     ) -> Result<Vec<Vec<f64>>, Box<dyn Error>>;
 }
 
@@ -359,7 +369,7 @@ mod tests {
             &self.buffer
         }
 
-        fn train_step_gpu_native(&mut self, _: usize) -> Option<f32> {
+        fn train_step_gpu_native(&mut self, _: usize, _device: &B::Device) -> Option<f32> {
             None
         }
 

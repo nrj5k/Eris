@@ -9,7 +9,9 @@ use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Tensor;
 
 use crate::buffer::{GpuRingBuffer, GpuTransitionBatch};
-use crate::checkpoint::{load_checkpoint, save_checkpoint, CheckpointMetadata};
+use crate::checkpoint::{
+    load_checkpoint, save_checkpoint, CheckpointMetadata, CheckpointMetadataExt,
+};
 use crate::loss;
 use crate::models::CombinedModel;
 use crate::trainers::base::TrainerConfig;
@@ -22,6 +24,17 @@ pub struct MetisTrainerConfig {
     pub epsilon_end: f32,
     pub epsilon_decay: f32,
     pub learning_rate: f64,
+    /// Batch size for training. Should be warp-aligned (multiple of 32) for optimal
+    /// GPU utilization. Default: 2048 (32 × 64 warps).
+    ///
+    /// See [`DQNTrainerConfig`](crate::trainers::dqn_trainer::DQNTrainerConfig) for detailed
+    /// explanation of warp alignment.
+    ///
+    /// # Note for Metis (Combined Model)
+    ///
+    /// Metis uses a CombinedModel (Bandit + DQN) which benefits significantly from
+    /// larger batch sizes due to the increased model complexity. The default 2048
+    /// provides good throughput while maintaining training stability.
     pub batch_size: usize,
     pub buffer_capacity: usize,
     pub target_update_freq: usize,
@@ -158,6 +171,18 @@ impl MetisTrainerConfig {
         if self.bandit_loss_weight < 0.0 {
             return Err("bandit_loss_weight must be >= 0".to_string());
         }
+
+        // Warn about non-warp-aligned batch size
+        if !self.is_batch_size_warp_aligned() {
+            log::warn!(
+                "[STAGE:WARN] batch_size {} is not warp-aligned (not a multiple of 32). \
+                 Consider using {} for better GPU utilization. \
+                 Warp alignment reduces wasted GPU cycles.",
+                self.batch_size,
+                self.align_batch_size_to_warp()
+            );
+        }
+
         Ok(())
     }
 }
@@ -355,22 +380,27 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
     /// Save checkpoint
     pub fn save(
         &self,
-        path: &std::path::Path,
+        directory: &std::path::Path,
+        name: &str,
         episode: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let metadata = CheckpointMetadata {
-            step_count: self.step_count,
-            epsilon: self.epsilon,
-            episode,
-        };
-        save_checkpoint(&self.model, &metadata, path)
+        let metadata =
+            CheckpointMetadata::new("Combined".to_string(), episode, serde_json::json!({}))
+                .with_training_state(self.step_count, episode, self.epsilon, 0.0);
+        save_checkpoint(&self.model, directory, name, episode, &metadata)?;
+        Ok(())
     }
 
     /// Load checkpoint
-    pub fn load(&mut self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn load(
+        &mut self,
+        directory: &std::path::Path,
+        name: &str,
+        episode: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let config = || self.model.clone();
         let (loaded_model, metadata) =
-            load_checkpoint::<B, CombinedModel<B>>(path, &self.device, config)?;
+            load_checkpoint::<B, CombinedModel<B>>(directory, name, episode, &self.device, config)?;
         self.model = loaded_model;
         self.step_count = metadata.step_count;
         self.epsilon = metadata.epsilon;

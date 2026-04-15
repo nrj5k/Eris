@@ -5,7 +5,7 @@ use rand::RngExt;
 /// Discrete action space (e.g., number of tiers)
 #[derive(Debug, Clone, Copy)]
 pub struct DiscreteSpace {
-    n: usize, // Number of discrete actions
+    pub n: usize, // Number of discrete actions
 }
 
 impl DiscreteSpace {

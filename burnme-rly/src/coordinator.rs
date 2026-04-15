@@ -3,6 +3,7 @@
 use crate::{
     buffer::Transition,
     traits::{BatchedActionSelector, GpuTrainable, VecEnvironment},
+    warmup,
 };
 use burn::tensor::backend::AutodiffBackend;
 use std::error::Error;
@@ -164,6 +165,7 @@ impl GpuTrainingCoordinator {
         let mut episode_rewards: Vec<f64> = Vec::new();
         let mut total_loss = 0.0f32;
         let mut train_steps = 0usize;
+        let mut steps_since_last_train: usize = 0;
 
         // Initialize per-environment tracking
         let num_envs = env.num_envs();
@@ -189,27 +191,28 @@ impl GpuTrainingCoordinator {
             // Reset done environments
             let reset_obs = env.reset_done_environments(&step_results)?;
 
-            // Store transitions and track rewards
+            // Batch-collect transitions for push_batch
+            let mut transitions = Vec::with_capacity(num_envs);
             for (i, result) in step_results.iter().enumerate() {
                 let clipped_reward = result.reward.clamp(-1.0, 1.0);
 
-                // Store in CPU buffer (O(1), no GPU allocation)
-                let transition = Transition {
+                // Use reset observation if environment was reset, otherwise use current observation
+                // reset_obs[i] is Some(obs) if env i was reset, None otherwise
+                let next_state = reset_obs
+                    .get(i)
+                    .and_then(|opt| opt.as_ref())
+                    .map(|obs| obs.iter().map(|&x| x as f32).collect::<Vec<_>>())
+                    .unwrap_or_else(|| result.observation.iter().map(|&x| x as f32).collect());
+
+                transitions.push(Transition {
                     state: observations[i].iter().map(|&x| x as f32).collect(),
                     action: result.action,
                     reward: clipped_reward as f32,
-                    next_state: reset_obs
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_else(|| vec![0.0; env.observation_dim()])
-                        .iter()
-                        .map(|&x| x as f32)
-                        .collect(),
+                    next_state,
                     done: result.done,
-                };
-
-                agent.buffer_mut().push(transition);
+                });
             }
+            agent.buffer_mut().push_batch(transitions);
 
             // Update observations for next step - get fresh observations after resets
             observations = env.get_current_observations(&step_results, &reset_obs)?;
@@ -221,16 +224,28 @@ impl GpuTrainingCoordinator {
             }
 
             // Determine if we should train
-            let should_train = if agent.is_warmup_complete() {
-                // Train every train_frequency steps after warmup
-                total_steps.is_multiple_of(self.config.train_frequency)
-            } else {
-                // Always train during warmup
-                true
-            };
+            let should_train = warmup::should_train(
+                agent.is_warmup_complete(),
+                steps_since_last_train,
+                self.config.train_frequency,
+            );
 
             if should_train {
-                if let Some(loss) = agent.train_step_gpu_native(total_steps) {
+                // ASYNC LOSS ACCUMULATION (Metis optimization)
+                //
+                // Traditional: Loss synced from GPU to CPU every step (GPU→CPU barrier)
+                // Optimized: Loss accumulated on GPU for N steps, synced only every Nth step
+                //
+                // Benefits:
+                // - Reduces GPU→CPU synchronization overhead by ~90% (with loss_sync_freq=100)
+                // - Higher GPU utilization (less idle time waiting for CPU sync)
+                // - Better throughput (more training steps per second)
+                //
+                // Tradeoff:
+                // - Loss value is delayed by up to loss_sync_freq steps
+                // - Average is still accurate (just over synced steps only)
+                if let Some(loss) = agent.train_step_gpu_native(total_steps, device) {
+                    // Only accumulate loss when it's synced from GPU
                     total_loss += loss;
                     train_steps += 1;
                     // Decay exploration after each training step
@@ -241,6 +256,7 @@ impl GpuTrainingCoordinator {
                         agent.update_target_network();
                     }
                 }
+                steps_since_last_train = 0;
             }
 
             // Only count episodes when environment is done
@@ -252,7 +268,8 @@ impl GpuTrainingCoordinator {
                     env_steps[i] = 0;
                 }
             }
-            total_steps += 1;
+            total_steps += num_envs;
+            steps_since_last_train += num_envs;
 
             // Checkpointing
             if episode_count > 0 && episode_count.is_multiple_of(self.config.checkpoint_interval) {
@@ -475,7 +492,11 @@ mod integration_tests {
             self.buffer.len()
         }
 
-        fn train_step_gpu_native(&mut self, _steps: usize) -> Option<f32> {
+        fn train_step_gpu_native(
+            &mut self,
+            _steps: usize,
+            _device: &<TestBackend as burn::tensor::backend::Backend>::Device,
+        ) -> Option<f32> {
             // Mock training: just return a fake loss
             self.step_count += 1;
             Some(0.5)
@@ -619,13 +640,15 @@ mod integration_tests {
         fn reset_done_environments(
             &mut self,
             results: &[StepResult],
-        ) -> Result<Vec<Vec<f64>>, Box<dyn std::error::Error>> {
+        ) -> Result<Vec<Option<Vec<f64>>>, Box<dyn std::error::Error>> {
             let mut reset_obs = Vec::new();
             for (i, result) in results.iter().enumerate() {
                 if result.done {
                     self.step_count[i] = 0;
                     self.observations[i] = vec![0.0; 4];
-                    reset_obs.push(self.observations[i].clone());
+                    reset_obs.push(Some(self.observations[i].clone()));
+                } else {
+                    reset_obs.push(None);
                 }
             }
             Ok(reset_obs)
@@ -634,9 +657,17 @@ mod integration_tests {
         fn get_current_observations(
             &self,
             results: &[StepResult],
-            _reset_obs: &[Vec<f64>],
+            reset_obs: &[Option<Vec<f64>>],
         ) -> Result<Vec<Vec<f64>>, Box<dyn std::error::Error>> {
-            Ok(results.iter().map(|r| r.observation.clone()).collect())
+            let mut observations = Vec::with_capacity(results.len());
+            for (i, result) in results.iter().enumerate() {
+                if let Some(obs) = &reset_obs[i] {
+                    observations.push(obs.clone());
+                } else {
+                    observations.push(result.observation.clone());
+                }
+            }
+            Ok(observations)
         }
     }
 

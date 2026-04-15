@@ -40,7 +40,8 @@ pub fn should_train(
         true
     } else {
         // Train every N steps after warmup
-        steps_since_last_train >= train_frequency
+        // Also train on first step (steps_since_last_train == 0) after warmup completes
+        steps_since_last_train == 0 || steps_since_last_train >= train_frequency
     }
 }
 
@@ -55,6 +56,7 @@ pub fn should_train(
 /// # Arguments
 /// * `agent` - The learning agent implementing GpuTrainable
 /// * `steps_since_last_train` - Steps since last training call
+/// * `device` - GPU device for tensor operations
 ///
 /// # Returns
 /// * `Some(loss)` if training occurred
@@ -64,13 +66,14 @@ pub fn should_train(
 /// ```rust,ignore
 /// use burnme_rly::warmup::train_step_with_warmup;
 ///
-/// if let Some(loss) = train_step_with_warmup(&mut agent, steps) {
+/// if let Some(loss) = train_step_with_warmup(&mut agent, steps, &device) {
 ///     total_loss += loss;
 /// }
 /// ```
 pub fn train_step_with_warmup<B: AutodiffBackend>(
     agent: &mut impl GpuTrainable<B>,
     steps_since_last_train: usize,
+    device: &B::Device,
 ) -> Option<f32> {
     // Determine effective batch size based on warmup state
     let batch_size = if agent.is_warmup_complete() {
@@ -91,7 +94,51 @@ pub fn train_step_with_warmup<B: AutodiffBackend>(
     }
 
     // Training step handles its own sampling internally
-    agent.train_step_gpu_native(steps_since_last_train)
+    agent.train_step_gpu_native(steps_since_last_train, device)
+}
+
+/// Execute a training step with automatic warmup handling and configurable batch sizes.
+///
+/// This variant allows the coordinator to override the agent's warmup_batch_size,
+/// fixing the bug where hardcoded values were used instead of the configured value.
+///
+/// # Arguments
+/// * `agent` - The learning agent implementing GpuTrainable
+/// * `full_batch_size` - Full batch size from coordinator config
+/// * `warmup_batch_size` - Warmup batch size from coordinator config (overrides agent's default)
+/// * `steps_since_last_train` - Steps since last training call
+/// * `device` - GPU device for tensor operations
+///
+/// # Returns
+/// * `Some(loss)` if training occurred
+/// * `None` if training was skipped (insufficient samples, frequency not met)
+pub fn train_step_with_warmup_config<B: AutodiffBackend>(
+    agent: &mut impl GpuTrainable<B>,
+    full_batch_size: usize,
+    warmup_batch_size: usize,
+    steps_since_last_train: usize,
+    device: &B::Device,
+) -> Option<f32> {
+    // Determine effective batch size using coordinator-provided config
+    let batch_size = if agent.is_warmup_complete() {
+        full_batch_size
+    } else {
+        let effective = warmup_batch_size.min(full_batch_size);
+        // Check if we should complete warmup
+        let buffer_len: usize = agent.buffer().len();
+        if buffer_len >= full_batch_size {
+            agent.set_warmup_complete(true);
+        }
+        effective
+    };
+
+    // Check if buffer has enough samples
+    if !agent.buffer().can_sample(batch_size) {
+        return None;
+    }
+
+    // Training step handles its own sampling internally
+    agent.train_step_gpu_native(steps_since_last_train, device)
 }
 
 #[cfg(test)]
@@ -109,7 +156,7 @@ mod tests {
     #[test]
     fn test_should_train_after_warmup() {
         // After warmup: train based on frequency
-        assert!(!should_train(true, 0, 4)); // Just trained
+        assert!(should_train(true, 0, 4)); // First step after warmup should train
         assert!(!should_train(true, 3, 4)); // Not yet
         assert!(should_train(true, 4, 4)); // Time to train
         assert!(should_train(true, 5, 4)); // Past due

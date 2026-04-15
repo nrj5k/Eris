@@ -50,19 +50,24 @@ pub mod warmup;
 // TensorRingBuffer is deprecated but re-exported for backward compatibility
 #[allow(deprecated)]
 pub use buffer::{
-    CpuRingBuffer, GpuRingBuffer, GpuTransitionBatch, TensorRingBuffer, TensorTransitionBatch,
-    Transition,
+    CpuRingBuffer, GpuRingBuffer, GpuTransitionBatch, HybridRingBuffer, TensorRingBuffer,
+    TensorTransitionBatch, Transition,
 };
-pub use checkpoint::{load_checkpoint, save_checkpoint, CheckpointMetadata};
+pub use checkpoint::{
+    load_checkpoint, save_checkpoint, CheckpointMetadata, CheckpointMetadataExt, Checkpointable,
+    CHECKPOINT_VERSION,
+};
 pub use coordinator::{GpuTrainingCoordinator, TrainingConfig, TrainingMetrics};
 pub use diagnostics::{log_backend_info, SimpleTimer};
 pub use env::{Info, StepResult};
-pub use loss::{compute_double_dqn_loss, compute_td_target};
+pub use loss::{
+    compute_double_dqn_loss, compute_double_dqn_loss_rank2, compute_td_loss, compute_td_target,
+};
 pub use models::CombinedModel;
 pub use space::DiscreteSpace;
 pub use trainers::{DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig};
 pub use traits::{BatchedActionSelector, GpuTrainable, GpuTrainableExt, VecEnvironment};
-pub use warmup::{should_train, train_step_with_warmup};
+pub use warmup::{should_train, train_step_with_warmup, train_step_with_warmup_config};
 
 // Version info
 pub const VERSION: &str = "0.1.0";
@@ -73,12 +78,10 @@ pub const VERSION: &str = "0.1.0";
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// // In your main.rs:
-/// fn main() {
-///     burnme_rly::init_logging();
-///     // ... rest of your code
-/// }
+/// burnme_rly::init_logging();
+/// // ... rest of your code
 /// ```
 ///
 /// Then run with:
