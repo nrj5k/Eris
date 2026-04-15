@@ -14,6 +14,10 @@
 use burn::tensor::TensorData;
 use clap::{Parser, ValueEnum};
 use eris::device::{available_backends, Device};
+use eris::dispatch_training;
+#[cfg(feature = "cuda")]
+use eris::utils::is_gpu_backend;
+use eris::utils::log_backend_info;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -55,6 +59,17 @@ enum LogLevel {
     Error,
 }
 
+/// Trace file format
+#[derive(Clone, Debug, ValueEnum)]
+enum TraceFormat {
+    /// Auto-detect from file extension
+    Autodetect,
+    /// Recorder CSV format
+    Recorder,
+    /// DFTracer .pfw.gz format
+    Dftracer,
+}
+
 /// Validate batch size is a multiple of 32 and within reasonable bounds
 fn validate_batch_size(s: &str) -> Result<usize, String> {
     let size: usize = s.parse().map_err(|_| "Invalid number")?;
@@ -64,11 +79,13 @@ fn validate_batch_size(s: &str) -> Result<usize, String> {
             size
         ));
     }
+    // Allow smaller sizes for warmup_batch_size
     if size < 32 {
         return Err(format!("Batch size must be at least 32 (got {})", size));
     }
-    if size > 16384 {
-        return Err(format!("Batch size should not exceed 16384 (got {})", size));
+    // Increase max for large batch training
+    if size > 65536 {
+        return Err(format!("Batch size should not exceed 65536 (got {})", size));
     }
     Ok(size)
 }
@@ -93,6 +110,19 @@ struct Args {
     #[arg(short = 'B', long, default_value = "2048", value_parser = validate_batch_size)]
     batch_size: usize,
 
+    /// Warmup batch size for training (smaller batches during initial steps)
+    /// During warmup, uses this smaller batch size to stabilize training.
+    /// After warmup_steps, switches to full batch_size.
+    /// Must be <= batch_size and multiple of 32.
+    #[arg(long, default_value = "256", value_parser = validate_batch_size)]
+    warmup_batch_size: usize,
+
+    /// Number of warmup steps before using full batch size
+    /// During warmup, training uses warmup_batch_size and runs every step.
+    /// After warmup, uses full batch_size and runs every train_freq steps.
+    #[arg(long, default_value = "1000")]
+    warmup_steps: usize,
+
     /// Learning rate
     #[arg(short, long, default_value = "0.0001")]
     learning_rate: f64,
@@ -104,6 +134,14 @@ struct Args {
     /// Path to configuration file
     #[arg(short, long, default_value = "config/tiers.toml")]
     config: PathBuf,
+
+    /// Path to trace file (CSV or .pfw.gz)
+    #[arg(long, default_value = "recorder-csv/NWChem-64_combined.csv")]
+    trace_file: PathBuf,
+
+    /// Trace format: recorder (CSV), dftracer (pfw.gz), or autodetect (by extension)
+    #[arg(long, value_enum, default_value = "autodetect")]
+    trace_format: TraceFormat,
 
     /// Number of parallel environments
     #[arg(long, default_value = "16")]
@@ -159,6 +197,15 @@ struct Args {
     /// Logging verbosity level
     #[arg(long, value_enum, default_value = "info")]
     log_level: LogLevel,
+}
+
+/// Convert CLI TraceFormat to library TraceFormat
+fn to_trace_format(format: &TraceFormat) -> eris::TraceFormat {
+    match format {
+        TraceFormat::Autodetect => eris::TraceFormat::Autodetect,
+        TraceFormat::Recorder => eris::TraceFormat::Recorder,
+        TraceFormat::Dftracer => eris::TraceFormat::Dftracer,
+    }
 }
 
 // ============================================================================
@@ -235,54 +282,52 @@ fn main() {
     println!("Using backend: {}", device.name());
 
     // GPU DIAGNOSTIC: Verify compiled backend features
-    tracing::debug!("[STAGE:DIAG] GPU DIAGNOSTIC: Compiled features:");
+    tracing::debug!("GPU DIAGNOSTIC: Compiled features:");
     #[cfg(feature = "cuda")]
-    tracing::debug!("  [STAGE:OK] cuda feature: ENABLED");
+    tracing::debug!("  cuda feature: ENABLED");
     #[cfg(not(feature = "cuda"))]
-    tracing::error!(
-        "  [STAGE:FAIL] cuda feature: DISABLED (binary compiled without CUDA support!)"
-    );
+    tracing::warn!("CUDA feature disabled (binary compiled without CUDA support)");
     #[cfg(feature = "wgpu")]
-    tracing::debug!("  [STAGE:OK] wgpu feature: ENABLED");
+    tracing::debug!("  wgpu feature: ENABLED");
     #[cfg(not(feature = "wgpu"))]
-    tracing::info!("  [STAGE:WARN]  wgpu feature: DISABLED");
+    tracing::info!("  wgpu feature: DISABLED");
     #[cfg(feature = "cpu")]
-    tracing::debug!("  [STAGE:OK] cpu feature: ENABLED");
+    tracing::debug!("  cpu feature: ENABLED");
     #[cfg(not(feature = "cpu"))]
-    tracing::info!("  [STAGE:WARN]  cpu feature: DISABLED");
+    tracing::info!("  cpu feature: DISABLED");
 
     // GPU DIAGNOSTIC: Show which Device variant was selected at runtime
     match &device {
         #[cfg(feature = "cuda")]
         Device::Cuda(ref dev) => tracing::debug!(
-            "[STAGE:DIAG] GPU DIAGNOSTIC: Device::Cuda variant selected - CUDA device: {:?}",
+            "GPU DIAGNOSTIC: Device::Cuda variant selected - CUDA device: {:?}",
             dev
         ),
         #[cfg(feature = "wgpu")]
         Device::Wgpu(ref dev) => tracing::debug!(
-            "[STAGE:DIAG] GPU DIAGNOSTIC: Device::Wgpu variant selected - WGPU device: {:?}",
+            "GPU DIAGNOSTIC: Device::Wgpu variant selected - WGPU device: {:?}",
             dev
         ),
         #[cfg(feature = "cpu")]
         Device::Cpu(ref dev) => tracing::debug!(
-            "[STAGE:DIAG] GPU DIAGNOSTIC: Device::Cpu variant selected - CPU device: {:?}",
+            "GPU DIAGNOSTIC: Device::Cpu variant selected - CPU device: {:?}",
             dev
         ),
         #[cfg(feature = "rocm")]
         Device::Rocm(ref dev) => tracing::debug!(
-            "[STAGE:DIAG] GPU DIAGNOSTIC: Device::Rocm variant selected - ROCm device: {:?}",
+            "GPU DIAGNOSTIC: Device::Rocm variant selected - ROCm device: {:?}",
             dev
         ),
     }
 
     let model_name = format!("{:?}", args.model).to_lowercase();
-    println!("=== Training Model: {} ===", model_name);
-    println!("Episodes: {}", args.episodes);
-    println!("Max steps: {}", args.max_steps);
-    println!("Batch size: {}", args.batch_size);
-    println!("Learning rate: {}", args.learning_rate);
-    println!("Backend: {} ✓", device.name());
-    println!();
+    tracing::debug!("Training Model: {}", model_name);
+    tracing::debug!("Episodes: {}", args.episodes);
+    tracing::debug!("Max steps: {}", args.max_steps);
+    tracing::debug!("Batch size: {}", args.batch_size);
+    tracing::debug!("Learning rate: {}", args.learning_rate);
+    tracing::debug!("Backend: {} ✓", device.name());
+    // tracing::debug!();
 
     // Spawn training in a thread with increased stack size (512MB for Burn)
     use std::thread;
@@ -322,211 +367,35 @@ fn train_model_generic(args: &Args, device: Device) -> Result<(), String> {
     // Check if using Catcher (DDPG - requires backend)
     if matches!(args.model, ModelType::Catcher) {
         // Dispatch to Catcher training with appropriate backend
-        return match device {
-            #[cfg(feature = "cpu")]
-            Device::Cpu(ndarray_device) => {
-                use burn::backend::{Autodiff, NdArray};
-                type Backend = Autodiff<NdArray<f32>>;
-                println!("Running on CPU (NdArray)");
-                run_catcher_training::<Backend>(args, ndarray_device)
-            }
-
-            #[cfg(feature = "wgpu")]
-            Device::Wgpu(wgpu_device) => {
-                use burn::backend::{Autodiff, Wgpu};
-                type Backend = Autodiff<Wgpu<f32, i32>>;
-                println!("Running on GPU (Wgpu)");
-                run_catcher_training::<Backend>(args, wgpu_device)
-            }
-
-            #[cfg(feature = "cuda")]
-            Device::Cuda(cuda_device) => {
-                use burn::backend::{Autodiff, Cuda};
-                type Backend = Autodiff<Cuda<f32, i32>>;
-                println!("Running on CUDA");
-                run_catcher_training::<Backend>(args, cuda_device)
-            }
-
-            #[cfg(feature = "rocm")]
-            Device::Rocm(rocm_device) => {
-                use burn::backend::{Autodiff, Rocm};
-                type Backend = Autodiff<Rocm<f32, i32>>;
-                println!("Running on ROCm");
-                run_catcher_training::<Backend>(args, rocm_device)
-            }
-        };
+        return dispatch_training!(device, |B, dev| run_catcher_training::<B>(args, dev));
     }
 
     // Check if using DQN (requires backend)
     if matches!(args.model, ModelType::Dqn) {
-        return match device {
-            #[cfg(feature = "cpu")]
-            Device::Cpu(ndarray_device) => {
-                use burn::backend::{Autodiff, NdArray};
-                type Backend = Autodiff<NdArray<f32>>;
-                println!("Running DQN on CPU (NdArray)");
-                run_dqn_training::<Backend>(args, ndarray_device, exploration.clone())
-            }
-
-            #[cfg(feature = "wgpu")]
-            Device::Wgpu(wgpu_device) => {
-                use burn::backend::{Autodiff, Wgpu};
-                type Backend = Autodiff<Wgpu<f32, i32>>;
-                println!("Running DQN on GPU (Wgpu)");
-                run_dqn_training::<Backend>(args, wgpu_device, exploration.clone())
-            }
-
+        return dispatch_training!(device, |B, dev| {
             #[cfg(feature = "cuda")]
-            Device::Cuda(cuda_device) => {
-                use burn::backend::{Autodiff, Cuda};
-                type Backend = Autodiff<Cuda<f32, i32>>;
-
-                // [STAGE:CRITICAL] DEBUG: DQN CUDA PATH ACTIVE
-                tracing::trace!("[STAGE:CRITICAL] DQN CUDA PATH ACTIVE [STAGE:CRITICAL]");
-                tracing::trace!(
-                    "[STAGE:CRITICAL] Backend type: {}",
-                    std::any::type_name::<Backend>()
-                );
-                tracing::trace!("[STAGE:CRITICAL] CUDA device: {:?}", cuda_device);
-
-                println!("Running DQN on CUDA");
-                // GPU DIAGNOSTIC: Verify the Backend type at compile time
-                tracing::debug!(
-                    "[STAGE:DIAG] GPU DIAGNOSTIC: Backend type = {}",
-                    std::any::type_name::<Backend>()
-                );
-                // Quick sanity check: time a small tensor operation
-                let diag_start = std::time::Instant::now();
-                let _test_tensor =
-                    burn::tensor::Tensor::<Backend, 2>::zeros([64, 128], &cuda_device);
-                let _ = _test_tensor.into_data(); // Force GPU sync
-                let diag_elapsed = diag_start.elapsed();
-                tracing::debug!(
-                    "[STAGE:DIAG] GPU DIAGNOSTIC: Zero tensor [64,128] + sync: {:?} (GPU<1ms, CPU>5ms)",
-                    diag_elapsed
-                );
-                run_dqn_training::<Backend>(args, cuda_device, exploration.clone())
+            if is_gpu_backend::<B>() {
+                tracing::trace!("DQN CUDA PATH ACTIVE");
             }
-
-            #[cfg(feature = "rocm")]
-            Device::Rocm(rocm_device) => {
-                use burn::backend::{Autodiff, Rocm};
-                type Backend = Autodiff<Rocm<f32, i32>>;
-                println!("Running DQN on ROCm");
-                run_dqn_training::<Backend>(args, rocm_device, exploration.clone())
-            }
-        };
+            run_dqn_training::<B>(args, dev, exploration.clone())
+        });
     }
 
     // Check if using Bandit (requires backend)
     if matches!(args.model, ModelType::Bandit) {
-        return match device {
-            #[cfg(feature = "cpu")]
-            Device::Cpu(ndarray_device) => {
-                use burn::backend::{Autodiff, NdArray};
-                type Backend = Autodiff<NdArray<f32>>;
-                println!("Running Bandit on CPU (NdArray)");
-                run_bandit_training::<Backend>(args, ndarray_device, exploration.clone())
-            }
-
-            #[cfg(feature = "wgpu")]
-            Device::Wgpu(wgpu_device) => {
-                use burn::backend::{Autodiff, Wgpu};
-                type Backend = Autodiff<Wgpu<f32, i32>>;
-                println!("Running Bandit on GPU (Wgpu)");
-                run_bandit_training::<Backend>(args, wgpu_device, exploration.clone())
-            }
-
-            #[cfg(feature = "cuda")]
-            Device::Cuda(cuda_device) => {
-                use burn::backend::{Autodiff, Cuda};
-                type Backend = Autodiff<Cuda<f32, i32>>;
-                println!("Running Bandit on CUDA");
-                run_bandit_training::<Backend>(args, cuda_device, exploration.clone())
-            }
-
-            #[cfg(feature = "rocm")]
-            Device::Rocm(rocm_device) => {
-                use burn::backend::{Autodiff, Rocm};
-                type Backend = Autodiff<Rocm<f32, i32>>;
-                println!("Running Bandit on ROCm");
-                run_bandit_training::<Backend>(args, rocm_device, exploration.clone())
-            }
-        };
+        return dispatch_training!(device, |B, dev| {
+            run_bandit_training::<B>(args, dev, exploration.clone())
+        });
     }
 
     // Use VecEnv for parallel environments if num_envs > 1
     if args.num_envs > 1 {
         println!("Using parallel environments: {}", args.num_envs);
         // Dispatch to VecEnv training with appropriate backend
-        match device {
-            #[cfg(feature = "cpu")]
-            Device::Cpu(ndarray_device) => {
-                use burn::backend::{Autodiff, NdArray};
-                type Backend = Autodiff<NdArray<f32>>;
-                println!("Running on CPU (NdArray)");
-                run_training_vecenv::<Backend>(args, ndarray_device)
-            }
-
-            #[cfg(feature = "wgpu")]
-            Device::Wgpu(wgpu_device) => {
-                use burn::backend::{Autodiff, Wgpu};
-                type Backend = Autodiff<Wgpu<f32, i32>>;
-                println!("Running on GPU (Wgpu)");
-                run_training_vecenv::<Backend>(args, wgpu_device)
-            }
-
-            #[cfg(feature = "cuda")]
-            Device::Cuda(cuda_device) => {
-                use burn::backend::{Autodiff, Cuda};
-                type Backend = Autodiff<Cuda<f32, i32>>;
-                println!("Running on CUDA");
-                run_training_vecenv::<Backend>(args, cuda_device)
-            }
-
-            #[cfg(feature = "rocm")]
-            Device::Rocm(rocm_device) => {
-                use burn::backend::{Autodiff, Rocm};
-                type Backend = Autodiff<Rocm<f32, i32>>;
-                println!("Running on ROCm");
-                run_training_vecenv::<Backend>(args, rocm_device)
-            }
-        }
+        return dispatch_training!(device, |B, dev| run_training_vecenv::<B>(args, dev));
     } else {
         // Use original single-env training
-        match device {
-            #[cfg(feature = "cpu")]
-            Device::Cpu(ndarray_device) => {
-                use burn::backend::{Autodiff, NdArray};
-                type Backend = Autodiff<NdArray<f32>>;
-                println!("Running on CPU (NdArray)");
-                run_training::<Backend>(args, ndarray_device)
-            }
-
-            #[cfg(feature = "wgpu")]
-            Device::Wgpu(wgpu_device) => {
-                use burn::backend::{Autodiff, Wgpu};
-                type Backend = Autodiff<Wgpu<f32, i32>>;
-                println!("Running on GPU (Wgpu)");
-                run_training::<Backend>(args, wgpu_device)
-            }
-
-            #[cfg(feature = "cuda")]
-            Device::Cuda(cuda_device) => {
-                use burn::backend::{Autodiff, Cuda};
-                type Backend = Autodiff<Cuda<f32, i32>>;
-                println!("Running on CUDA");
-                run_training::<Backend>(args, cuda_device)
-            }
-
-            #[cfg(feature = "rocm")]
-            Device::Rocm(rocm_device) => {
-                use burn::backend::{Autodiff, Rocm};
-                type Backend = Autodiff<Rocm<f32, i32>>;
-                println!("Running on ROCm");
-                run_training::<Backend>(args, rocm_device)
-            }
-        }
+        return dispatch_training!(device, |B, dev| run_training::<B>(args, dev));
     }
 }
 
@@ -559,15 +428,20 @@ fn run_training_vecenv<B: burn::tensor::backend::AutodiffBackend>(
 
     use eris::env::VecEnv;
     use eris::training::Transition;
-    use std::path::Path;
 
     let config_path = &args.config;
-    let trace_path = Path::new("recorder-csv/NWChem-64_combined.csv");
+    let trace_path = &args.trace_file;
 
     // Create vectorized environment
     println!("Creating {} parallel environments...", args.num_envs);
-    let mut vec_env = VecEnv::new(args.num_envs, config_path, trace_path, args.max_steps)
-        .map_err(|e| format!("Failed to create VecEnv: {}", e))?;
+    let mut vec_env = VecEnv::new(
+        args.num_envs,
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+    )
+    .map_err(|e| format!("Failed to create VecEnv: {}", e))?;
 
     // Reset all environments
     let mut observations = vec_env
@@ -646,7 +520,7 @@ fn run_training_vecenv<B: burn::tensor::backend::AutodiffBackend>(
             if result.done {
                 // Print episode completion with reward
                 println!(
-                    "[STAGE:OK] Episode {} completed: reward={:.2}, steps={}, env={}",
+                    "Episode {} completed: reward={:.2}, steps={}, env={}",
                     episode_count + 1,
                     env_cumulative_rewards[i],
                     env_steps[i],
@@ -882,15 +756,21 @@ fn run_training<B: burn::tensor::backend::AutodiffBackend>(
     use eris::env::Environment;
     use eris::env::IOBufferEnv;
     use eris::space::Space;
-    use std::path::Path;
 
     // Create environment
     let config_path = &args.config;
-    let trace_path = Path::new("recorder-csv/NWChem-64_combined.csv");
+    let trace_path = &args.trace_file;
     #[cfg(debug_assertions)]
     eprintln!("DEBUG: Creating environment");
-    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)
-        .map_err(|e| format!("Failed to create environment: {}", e))?;
+    let mut env = IOBufferEnv::new(
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+        None,
+        None,
+    )
+    .map_err(|e| format!("Failed to create environment: {}", e))?;
     #[cfg(debug_assertions)]
     eprintln!("DEBUG: Environment created");
 
@@ -1146,10 +1026,17 @@ fn run_cacheus_training(args: &Args) -> Result<(), String> {
     let mut policy = CacheusPolicy::new(2, args.learning_rate as f32);
 
     // Create environment
-    let trace_path = Path::new("recorder-csv/NWChem-64_combined.csv");
+    let trace_path = &args.trace_file;
     let config_path = &args.config;
-    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)
-        .map_err(|e| format!("Failed to create env: {}", e))?;
+    let mut env = IOBufferEnv::new(
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+        None,
+        None,
+    )
+    .map_err(|e| format!("Failed to create env: {}", e))?;
 
     // Training loop (online learning)
     let mut episode_rewards = Vec::new();
@@ -1277,12 +1164,18 @@ fn run_catcher_training<B: burn::tensor::backend::AutodiffBackend>(
     }
 
     // Create vectorized environment
-    let trace_path = Path::new("recorder-csv/NWChem-64_combined.csv");
+    let trace_path = &args.trace_file;
     let config_path = &args.config;
 
     println!("Creating {} parallel environments...", args.num_envs);
-    let mut vec_env = VecEnv::new(args.num_envs, config_path, trace_path, args.max_steps)
-        .map_err(|e| format!("Failed to create VecEnv: {}", e))?;
+    let mut vec_env = VecEnv::new(
+        args.num_envs,
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+    )
+    .map_err(|e| format!("Failed to create VecEnv: {}", e))?;
 
     // Get dimensions from environment
     let state_dim = vec_env.observation_dim();
@@ -1322,9 +1215,9 @@ fn run_catcher_training<B: burn::tensor::backend::AutodiffBackend>(
         args.episodes,
         args.max_steps,
         args.batch_size,
-        256, // warmup_batch_size
-        10,  // checkpoint_interval
-        4,   // train_frequency
+        args.warmup_batch_size,
+        10, // checkpoint_interval
+        4,  // train_frequency
     );
 
     println!("\nStarting Catcher training with GpuTrainingCoordinator...");
@@ -1410,12 +1303,18 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
     }
 
     // Create vectorized environment (like Metis)
-    let trace_path = Path::new("recorder-csv/NWChem-64_combined.csv");
+    let trace_path = &args.trace_file;
     let config_path = &args.config;
 
     println!("Creating {} parallel environments...", args.num_envs);
-    let mut vec_env = VecEnv::new(args.num_envs, config_path, trace_path, args.max_steps)
-        .map_err(|e| format!("Failed to create VecEnv: {}", e))?;
+    let mut vec_env = VecEnv::new(
+        args.num_envs,
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+    )
+    .map_err(|e| format!("Failed to create VecEnv: {}", e))?;
 
     // Get dimensions from environment
     let state_dim = vec_env.observation_dim();
@@ -1428,7 +1327,7 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
     let effective_buffer_capacity = if state_dim > 20 {
         let adjusted = (args.buffer_capacity / 2).max(10000); // Minimum 10k
         println!(
-            "[STAGE:WARN]  State dimension {} > 20, reducing buffer capacity: {} → {} (for GPU memory safety)",
+            "State dimension {} > 20, reducing buffer capacity: {} → {} (for GPU memory safety)",
             state_dim, args.buffer_capacity, adjusted
         );
         adjusted
@@ -1470,94 +1369,18 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
         device
     );
 
-    // GPU DIAGNOSTIC: Verify training will actually use GPU
-    {
-        let backend_name = std::any::type_name::<B>();
-        tracing::debug!(
-            "[STAGE:DIAG] GPU DIAGNOSTIC: Policy backend type = {}",
-            backend_name
-        );
-        if backend_name.contains("NdArray") {
-            tracing::error!(
-                "[STAGE:FAIL] GPU DIAGNOSTIC ERROR: Backend is NdArray (CPU)! Training will happen on CPU!"
-            );
-            tracing::error!(
-                "   → This means the CUDA path was NOT taken despite selecting --backend cuda"
-            );
-        } else if backend_name.contains("Cuda") {
-            tracing::debug!(
-                "[STAGE:OK] GPU DIAGNOSTIC: Backend is CUDA! Training should happen on GPU."
-            );
-        } else if backend_name.contains("Wgpu") {
-            tracing::info!(
-                "[STAGE:WARN]  GPU DIAGNOSTIC: Backend is WGPU (WebGPU). May work but CUDA is preferred."
-            );
-        } else {
-            tracing::info!(
-                "[STAGE:WARN]  GPU DIAGNOSTIC: Unknown backend type: {}",
-                backend_name
-            );
-        }
-
-        // Benchmark: run tensor operations to verify GPU is actually used
-        use burn::tensor::Tensor;
-        tracing::debug!("[STAGE:DIAG] GPU DIAGNOSTIC: Benchmarking tensor operations on device...");
-
-        // Test 1: Create and sync a zero tensor
-        let bench_start1 = std::time::Instant::now();
-        let test_zeros = Tensor::<B, 2>::zeros([64, 128], &device);
-        let _ = test_zeros.into_data(); // Force sync
-        let bench_elapsed1 = bench_start1.elapsed();
-        tracing::debug!(
-            "[STAGE:DIAG] GPU DIAGNOSTIC: Zero tensor [64,128] + sync: {:?}",
-            bench_elapsed1
-        );
-        tracing::trace!("   → GPU: <1ms | CPU: 1-5ms");
-
-        // Test 2: Create a random tensor and compute
-        let bench_start2 = std::time::Instant::now();
-        let test_random = Tensor::<B, 2>::random(
-            [256, state_dim],
-            burn::tensor::Distribution::Normal(0.0, 1.0),
-            &device,
-        );
-        let test_result = test_random.clone() * test_random; // Element-wise multiply
-        let _ = test_result.into_data(); // Force sync
-        let bench_elapsed2 = bench_start2.elapsed();
-        tracing::debug!(
-            "[STAGE:DIAG] GPU DIAGNOSTIC: Random tensor [256,{}] + multiply + sync: {:?}",
-            state_dim,
-            bench_elapsed2
-        );
-        tracing::trace!("   → GPU: <5ms | CPU: 5-50ms");
-
-        // Test 3: Large matmul-like operation
-        let bench_start3 = std::time::Instant::now();
-        let a = Tensor::<B, 2>::random(
-            [2048, 128],
-            burn::tensor::Distribution::Normal(0.0, 1.0),
-            &device,
-        );
-        let b = Tensor::<B, 2>::random(
-            [128, 128],
-            burn::tensor::Distribution::Normal(0.0, 1.0),
-            &device,
-        );
-        let mut result = a.clone();
-        for _ in 0..10 {
-            result = result.clone().matmul(b.clone());
-        }
-        let _ = result.into_data(); // Force sync
-        let bench_elapsed3 = bench_start3.elapsed();
-        tracing::debug!(
-            "[STAGE:DIAG] GPU DIAGNOSTIC: [2048x128] x [128x128] matmul x10 + sync: {:?}",
-            bench_elapsed3
-        );
-        tracing::trace!("   → GPU: <50ms | CPU: 500-5000ms");
-    }
+    // Log backend information using utility function
+    log_backend_info::<B>("run_dqn_training", &device);
 
     // Create training coordinator with configuration
-    let coordinator = GpuTrainingCoordinator::new(args.episodes, args.max_steps, args.batch_size);
+    let coordinator = GpuTrainingCoordinator::with_config(
+        args.episodes,
+        args.max_steps,
+        args.batch_size,
+        args.warmup_batch_size,
+        10, // checkpoint_interval
+        4,  // train_frequency
+    );
 
     println!("\nStarting training with GpuTrainingCoordinator...");
     println!(
@@ -1628,10 +1451,17 @@ fn run_bandit_training<B: burn::tensor::backend::AutodiffBackend>(
     println!("Exploration: {:?}", exploration);
 
     // Create environment
-    let trace_path = Path::new("recorder-csv/NWChem-64_combined.csv");
+    let trace_path = &args.trace_file;
     let config_path = &args.config;
-    let mut env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)
-        .map_err(|e| format!("Failed to create env: {}", e))?;
+    let mut env = IOBufferEnv::new(
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+        None,
+        None,
+    )
+    .map_err(|e| format!("Failed to create env: {}", e))?;
 
     // Get dimensions from environment
     let state_dim = env.observation_space().dim();
@@ -1785,6 +1615,8 @@ mod tests {
         assert_eq!(args.episodes, 100);
         assert_eq!(args.max_steps, 100);
         assert_eq!(args.batch_size, 2048); // Updated default for GPU optimization
+        assert_eq!(args.warmup_batch_size, 256);
+        assert_eq!(args.warmup_steps, 1000);
         assert!(matches!(
             args.exploration,
             ExplorationStrategy::EpsilonGreedy
@@ -1929,5 +1761,44 @@ mod tests {
             }
             _ => panic!("Expected UCB config"),
         }
+    }
+
+    #[test]
+    fn test_warmup_args() {
+        // Test warmup args default values
+        let args = Args::try_parse_from(&["train_model"]).unwrap();
+        assert_eq!(args.warmup_batch_size, 256);
+        assert_eq!(args.warmup_steps, 1000);
+
+        // Test warmup args with custom values
+        let args = Args::try_parse_from(&[
+            "train_model",
+            "--warmup-batch-size",
+            "4096",
+            "--warmup-steps",
+            "500",
+        ])
+        .unwrap();
+        assert_eq!(args.warmup_batch_size, 4096);
+        assert_eq!(args.warmup_steps, 500);
+    }
+
+    #[test]
+    fn test_validate_batch_size() {
+        // Valid batch sizes (multiples of 32)
+        assert!(validate_batch_size("32").is_ok());
+        assert!(validate_batch_size("256").is_ok());
+        assert!(validate_batch_size("4096").is_ok());
+        assert!(validate_batch_size("65536").is_ok());
+
+        // Invalid: not multiple of 32
+        assert!(validate_batch_size("33").is_err());
+        assert!(validate_batch_size("100").is_err());
+
+        // Invalid: too small
+        assert!(validate_batch_size("0").is_err());
+
+        // Invalid: too large
+        assert!(validate_batch_size("65568").is_err());
     }
 }

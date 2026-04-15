@@ -21,6 +21,14 @@ enum LogLevel {
     Error,
 }
 
+/// Trace file format
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum TraceFormat {
+    Autodetect,
+    Recorder,
+    Dftracer,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "eris-test-env", version = "0.1.0")]
 struct Args {
@@ -29,6 +37,10 @@ struct Args {
 
     #[arg(short, long, default_value = "recorder-csv/NWChem-64_combined.csv")]
     trace: String,
+
+    /// Trace format: recorder (CSV), dftracer (pfw.gz), or autodetect
+    #[arg(long, value_enum, default_value = "autodetect")]
+    trace_format: TraceFormat,
 
     #[arg(short, long, default_value = "10")]
     max_steps: usize,
@@ -61,6 +73,14 @@ fn main() {
     }
 }
 
+fn to_trace_format(format: &TraceFormat) -> eris::TraceFormat {
+    match format {
+        TraceFormat::Autodetect => eris::TraceFormat::Autodetect,
+        TraceFormat::Recorder => eris::TraceFormat::Recorder,
+        TraceFormat::Dftracer => eris::TraceFormat::Dftracer,
+    }
+}
+
 fn test_env_only(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = Path::new(&args.config);
     let trace_path = Path::new(&args.trace);
@@ -70,7 +90,14 @@ fn test_env_only(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Config loaded");
 
     println!("\nCreating environment...");
-    let env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)?;
+    let env = IOBufferEnv::new(
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+        None,
+        None,
+    )?;
     println!("✓ Environment created");
 
     println!("\nEnvironment info:");

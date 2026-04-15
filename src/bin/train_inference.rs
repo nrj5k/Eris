@@ -11,9 +11,8 @@ use clap::Parser;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-use eris::config::{FullTrainingConfig, ModelArchitecture};
+use eris::config::FullTrainingConfig;
 use eris::env::IOBufferEnv;
-use eris::models::CombinedModelConfig;
 use eris::{Environment, Space};
 
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -23,6 +22,14 @@ enum LogLevel {
     Info,
     Warn,
     Error,
+}
+
+/// Trace file format
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum TraceFormat {
+    Autodetect,
+    Recorder,
+    Dftracer,
 }
 
 #[derive(Parser, Debug)]
@@ -39,6 +46,10 @@ struct Args {
     /// Path to trace CSV file
     #[arg(short, long, default_value = "recorder-csv/NWChem-64_combined.csv")]
     trace: String,
+
+    /// Trace format: recorder (CSV), dftracer (pfw.gz), or autodetect
+    #[arg(long, value_enum, default_value = "autodetect")]
+    trace_format: TraceFormat,
 
     /// Maximum steps per episode
     #[arg(short, long, default_value = "10")]
@@ -87,6 +98,14 @@ fn main() {
         .unwrap();
 }
 
+fn to_trace_format(format: &TraceFormat) -> eris::TraceFormat {
+    match format {
+        TraceFormat::Autodetect => eris::TraceFormat::Autodetect,
+        TraceFormat::Recorder => eris::TraceFormat::Recorder,
+        TraceFormat::Dftracer => eris::TraceFormat::Dftracer,
+    }
+}
+
 #[allow(deprecated)]
 fn run_test(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = Path::new(&args.config);
@@ -96,27 +115,18 @@ fn run_test(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let config = FullTrainingConfig::from_file(config_path)?;
 
     // Create environment
-    let env = IOBufferEnv::new(config_path, trace_path, args.max_steps, None, None)?;
+    let env = IOBufferEnv::new(
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+        None,
+        None,
+    )?;
 
     // Get dimensions
     let state_dim = env.observation_space().dim();
     let action_dim = env.action_space().n;
-
-    // Create model config
-    let model_config = match config.model.architecture {
-        ModelArchitecture::DuelingDQN | ModelArchitecture::SimpleDQN => CombinedModelConfig::new(
-            state_dim,
-            config.model.feature_dim,
-            config.model.dqn_hidden[0],
-            action_dim,
-        ),
-        ModelArchitecture::BanditDQN => CombinedModelConfig::new(
-            state_dim,
-            config.model.feature_dim,
-            config.model.dqn_hidden[0],
-            action_dim,
-        ),
-    };
 
     // Initialize NdArray device (NOT Autodiff)
     let device = burn::backend::ndarray::NdArrayDevice::Cpu;
@@ -134,7 +144,6 @@ fn run_test(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         )
         .init(&device),
     );
-    let model: eris::models::CombinedModel<NdArray> = *model;
     println!("✓ Model initialized successfully on heap");
 
     // Test forward pass
@@ -155,27 +164,33 @@ fn run_test(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut obs = env.reset();
     println!("  Initial observation: {} values", obs.len());
 
+    // Pre-allocate buffer to avoid allocation in loop
+    let mut obs_buf = vec![0.0f32; state_dim];
+
     for step in 0..5 {
         // Use model for action selection
-        let obs_f32: Vec<f32> = obs.iter().map(|&x| x as f32).collect();
-        let obs_tensor =
-            Tensor::<NdArray, 2>::from_data(TensorData::new(obs_f32, [1, state_dim]), &device);
+        // Reuse buffer: copy and convert in-place
+        obs_buf
+            .iter_mut()
+            .zip(obs.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+
+        // Create tensor from pre-allocated buffer (clone avoids growth/reallocation)
+        let obs_tensor = Tensor::<NdArray, 2>::from_data(
+            TensorData::new(obs_buf.clone(), [1, state_dim]),
+            &device,
+        );
 
         let forward_result = model.forward(obs_tensor);
         let q_values = forward_result.2;
-        let q_values_data = q_values.to_data();
-        let q_values_slice = q_values_data.as_slice::<f32>().unwrap();
-        let q_values_vec: Vec<f32> = q_values_slice.to_vec();
 
-        // Find action with highest Q-value
-        let mut max_q = f32::NEG_INFINITY;
-        let mut action = 0;
-        for (i, &q) in q_values_vec.iter().enumerate() {
-            if q > max_q {
-                max_q = q;
-                action = i;
-            }
-        }
+        // Use tensor argmax (matches pattern in combined.rs:161 and train_model.rs:678)
+        let action_tensor = q_values.argmax(1); // Returns [1, 1] tensor with index of max
+        let action: usize = action_tensor
+            .into_data()
+            .convert::<i32>()
+            .to_vec::<i32>()
+            .expect("argmax conversion")[0] as usize;
 
         let (next_obs, reward, done) = env.step(action);
         println!(
