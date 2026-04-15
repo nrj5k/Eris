@@ -12,6 +12,8 @@
 //! - **No VRAM Leak**: Memory stays constant during training
 
 use crate::training::tensor_buffer::TensorTransitionBatch;
+use crate::utils::backend_diagnostics::{detect_backend, log_backend_info};
+use crate::utils::timing::OneTimeDiag;
 use burn::tensor::{backend::Backend, Tensor, TensorData};
 use tracing;
 
@@ -140,53 +142,37 @@ impl<B: Backend> HybridRingBuffer<B> {
         batch_size: usize,
         device: &B::Device,
     ) -> Option<TensorTransitionBatch<B>> {
-        // [STAGE:CRITICAL] DEBUG: Sample batch logging
-        tracing::trace!(
-            "[STAGE:CRITICAL] sample_batch() called with batch_size={}, device=...",
-            batch_size
+        tracing::debug!(
+            "sample_batch() called: batch_size={}, buffer_len={}",
+            batch_size,
+            self.size
         );
-        tracing::trace!(
-            "[STAGE:CRITICAL] Backend in sample_batch: {}",
-            std::any::type_name::<B>()
-        );
+        tracing::debug!("sample_batch backend: {:?}", detect_backend::<B>());
 
-        // GPU DIAGNOSTIC: One-time device verification
-        static BUFFER_DIAG_PRINTED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        let should_print_diag = !BUFFER_DIAG_PRINTED.load(std::sync::atomic::Ordering::Relaxed);
+        // GPU DIAGNOSTIC: One-time device verification using utility
+        static DIAG: OneTimeDiag = OneTimeDiag::new();
 
-        if should_print_diag {
-            let backend_name = std::any::type_name::<B>();
-            tracing::debug!("[STAGE:DIAG] HybridRingBuffer::sample_batch DIAGNOSTIC (first call):");
-            tracing::debug!("   Backend type: {}", backend_name);
-            tracing::debug!("   Device param: {:?}", device);
-            tracing::debug!(
-                "   Buffer size: {}, Buffer capacity: {}",
-                self.size,
-                self.capacity
-            );
-            tracing::debug!("   State dim: {}", self.state_dim);
-            if backend_name.contains("NdArray") {
-                tracing::error!(
-                    "   [STAGE:FAIL] CRITICAL: Tensors will be created on CPU (NdArray backend)!"
-                );
-                tracing::error!(
-                    "   → Tensors created via Tensor::from_data() will use NdArray device"
-                );
-            } else if backend_name.contains("Cuda") {
-                tracing::info!("   [STAGE:OK] Tensors will be created on CUDA device");
-            }
-            BUFFER_DIAG_PRINTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        if DIAG.should_print() {
+            log_backend_info::<B>("HybridRingBuffer::sample_batch", device);
         }
 
         if self.size < batch_size {
+            tracing::debug!(
+                "sample_batch returning None: buffer size ({}) < batch_size ({})",
+                self.size,
+                batch_size
+            );
             return None;
         }
+
+        tracing::trace!("Generating random indices for {} samples", batch_size);
 
         // Random indices using rand crate
         use rand::prelude::IteratorRandom;
         let mut rng = rand::rng();
         let indices: Vec<usize> = (0..self.size).sample(&mut rng, batch_size);
+
+        tracing::trace!("Got {} random indices, gathering samples", indices.len());
 
         // Gather samples from CPU storage
         let mut batch_states = Vec::with_capacity(batch_size * self.state_dim);
@@ -202,6 +188,12 @@ impl<B: Backend> HybridRingBuffer<B> {
             batch_next_states.extend_from_slice(&self.next_states[idx]);
             batch_dones.push(self.dones[idx] as i64);
         }
+
+        tracing::debug!(
+            "Converting to GPU tensors: batch_size={}, state_dim={}",
+            batch_size,
+            self.state_dim
+        );
 
         // Convert to GPU tensors ONCE per sample (not per push!)
         let states_tensor = Tensor::from_data(
@@ -228,6 +220,12 @@ impl<B: Backend> HybridRingBuffer<B> {
         let dones_tensor = Tensor::from_data(
             TensorData::new(batch_dones_f32, [batch_size]).convert::<f32>(),
             device,
+        );
+
+        tracing::debug!(
+            "sample_batch SUCCESS: states shape [{}, {}]",
+            batch_size,
+            self.state_dim
         );
 
         Some(TensorTransitionBatch {

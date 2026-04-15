@@ -39,6 +39,7 @@
 //! ```
 
 use crate::training::checkpoint::CheckpointMetadataExt;
+use crate::utils::backend_diagnostics::log_backend_info;
 use burn::tensor::backend::AutodiffBackend;
 use std::error::Error;
 
@@ -448,21 +449,7 @@ impl GpuTrainingCoordinator {
         E: VecEnvironment,
         B: AutodiffBackend,
     {
-        // GPU DIAGNOSTIC: Verify backend type at training start
-        {
-            let backend_name = std::any::type_name::<B>();
-            tracing::debug!("[STAGE:DIAG] GpuTrainingCoordinator::run_training DIAGNOSTIC:");
-            tracing::debug!("   Backend type: {}", backend_name);
-            tracing::debug!("   Device: {:?}", device);
-            if backend_name.contains("NdArray") {
-                tracing::error!(
-                    "[STAGE:FAIL] CRITICAL: Backend is NdArray (CPU)! All training on CPU!"
-                );
-                tracing::error!("   → This likely means --backend cuda was not used, or cuda feature not compiled");
-            } else if backend_name.contains("Cuda") {
-                tracing::debug!("   [STAGE:OK] Backend is CUDA. Training should use GPU.");
-            }
-        }
+        log_backend_info::<B>("GpuTrainingCoordinator::run_training", device);
 
         // Initialize tracking
         let mut episode_count = 0;
@@ -560,14 +547,50 @@ impl GpuTrainingCoordinator {
             );
 
             if should_train {
-                // Use train_step_gpu_native which handles warmup logic internally
-                // This avoids the bug where we were passing a reduced batch_size
-                if let Some(loss) = agent.train_step_gpu_native(steps_since_last_train, device) {
-                    total_loss += loss as f64;
-                    train_steps += 1;
+                tracing::debug!(
+                    "Calling train_step_gpu_native_with_config, steps_since_last_train: {}, buffer_len: {}, warmup_complete: {}, coordinator_warmup_batch_size: {}, coordinator_batch_size: {}",
+                    steps_since_last_train,
+                    agent.gpu_buffer().len(),
+                    agent.is_warmup_complete(),
+                    self.warmup_batch_size,
+                    self.batch_size
+                );
+
+                // Use train_step_gpu_native_with_config to pass coordinator's batch sizes
+                // FIXES BUG: Agent's hardcoded warmup_batch_size (256) is now overridden
+                // by coordinator's configured warmup_batch_size (e.g., 1024)
+                let train_result = agent.train_step_gpu_native_with_config(
+                    steps_since_last_train,
+                    device,
+                    self.warmup_batch_size,
+                    self.batch_size,
+                );
+
+                match train_result {
+                    Some(loss) => {
+                        tracing::debug!(
+                            "train_step_gpu_native_with_config returned Some({:.4}), step_count: {}",
+                            loss,
+                            agent.step_count()
+                        );
+                        total_loss += loss as f64;
+                        train_steps += 1;
+                    }
+                    None => {
+                        tracing::debug!(
+                            "train_step_gpu_native_with_config returned None! buffer_len: {}, warmup_complete: {}",
+                            agent.gpu_buffer().len(),
+                            agent.is_warmup_complete()
+                        );
+                    }
                 }
                 steps_since_last_train = 0;
             } else {
+                tracing::debug!(
+                    "Skipping training, steps_since_last_train: {}, train_frequency: {}",
+                    steps_since_last_train,
+                    self.train_frequency
+                );
                 steps_since_last_train += num_envs;
             }
 

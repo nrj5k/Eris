@@ -18,6 +18,7 @@
 
 use crate::training::tensor_buffer::TensorTransitionBatch;
 use burn::tensor::backend::AutodiffBackend;
+use tracing;
 
 /// Trait for policies that support GPU-native training with TensorRingBuffer.
 ///
@@ -103,19 +104,78 @@ pub trait GpuTrainable<B: AutodiffBackend> {
         steps_since_last_train: usize,
         device: &B::Device,
     ) -> Option<f32> {
+        // Use agent's warmup_batch_size for backward compatibility
+        self.train_step_gpu_native_with_config(
+            steps_since_last_train,
+            device,
+            self.warmup_batch_size(),
+            self.full_batch_size(),
+        )
+    }
+
+    /// Perform a self-contained GPU-native training step with configurable batch sizes.
+    ///
+    /// This variant allows the coordinator to override batch sizes, fixing the issue
+    /// where the agent's hardcoded warmup_batch_size (256) was used instead of the
+    /// coordinator's configured value (e.g., 1024).
+    ///
+    /// Unlike `train_step_gpu()` which takes a pre-sampled batch,
+    /// this method handles warmup, sampling, and training internally.
+    ///
+    /// # Arguments
+    /// * `steps_since_last_train` - Steps since last training (used for training frequency)
+    /// * `device` - GPU device for tensor operations
+    /// * `warmup_batch_size` - Batch size during warmup (from coordinator)
+    /// * `full_batch_size` - Full batch size after warmup (from coordinator)
+    ///
+    /// # Returns
+    /// * `Some(loss)` if training occurred
+    /// * `None` if skipped (not time to train yet)
+    fn train_step_gpu_native_with_config(
+        &mut self,
+        steps_since_last_train: usize,
+        device: &B::Device,
+        warmup_batch_size: usize,
+        full_batch_size: usize,
+    ) -> Option<f32> {
+        // CRITICAL DEBUG: Entry point logging
+        tracing::debug!(
+            "train_step_gpu_native_with_config ENTRY, step_count: {}, steps_since_last_train: {}, buffer_len: {}, warmup_batch_size: {}, full_batch_size: {}",
+            self.step_count(),
+            steps_since_last_train,
+            self.gpu_buffer().len(),
+            warmup_batch_size,
+            full_batch_size
+        );
+
         // Check training frequency (every 4 steps after warmup)
         let should_train = if self.is_warmup_complete() {
+            tracing::debug!(
+                "Post-warmup: checking steps_since_last_train ({}) >= 4",
+                steps_since_last_train
+            );
             steps_since_last_train >= 4
         } else {
+            tracing::debug!(
+                "During warmup: training every step, buffer_len: {}",
+                self.gpu_buffer().len()
+            );
             true // Train every step during warmup
         };
 
         if !should_train {
+            tracing::debug!("train_step_gpu_native_with_config: SKIPPING (should_train=false)");
             return None;
         }
 
-        // Get effective batch size (handles warmup logic)
-        let batch_size = self.effective_batch_size(self.full_batch_size());
+        // Get effective batch size using coordinator's warmup_batch_size (FIXES THE BUG!)
+        let batch_size = self.effective_batch_size_with_config(full_batch_size, warmup_batch_size);
+        tracing::debug!(
+            "effective_batch_size_with_config: {}, full_batch_size: {}, warmup_batch_size: {}",
+            batch_size,
+            full_batch_size,
+            warmup_batch_size
+        );
 
         // GPU DIAGNOSTIC: Time the entire train_step_gpu_native call
         static FIRST_CALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -124,31 +184,59 @@ pub trait GpuTrainable<B: AutodiffBackend> {
 
         // Sample from GPU buffer
         let sample_start = std::time::Instant::now();
-        let batch = self.gpu_buffer_mut().sample_batch(batch_size, device)?;
+        tracing::debug!(
+            "Calling sample_batch(batch_size={}), buffer_len: {}",
+            batch_size,
+            self.gpu_buffer().len()
+        );
+        let batch = self.gpu_buffer_mut().sample_batch(batch_size, device);
+
+        // CRITICAL DEBUG: Check if sample_batch returned None
+        let batch = match batch {
+            Some(b) => {
+                tracing::debug!(
+                    "sample_batch SUCCESS, batch.states.shape: {:?}",
+                    b.states.shape()
+                );
+                b
+            }
+            None => {
+                tracing::debug!(
+                    "sample_batch returned None! buffer_len: {}, batch_size requested: {}",
+                    self.gpu_buffer().len(),
+                    batch_size
+                );
+                return None;
+            }
+        };
+
         let sample_elapsed = sample_start.elapsed();
 
         if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
-            println!(
-                "[STAGE:DIAG] train_step_gpu_native #{}: sample_batch(batch_size={}) took {:?}",
+            tracing::debug!(
+                "[STAGE:DIAG] train_step_gpu_native_with_config #{}: sample_batch(batch_size={}) took {:?}",
                 self.step_count(),
                 batch_size,
                 sample_elapsed
             );
             if sample_elapsed.as_millis() > 10 {
-                println!(
-                    "   [STAGE:WARN]  SLOW sample_batch (>10ms) - data transfer may be on CPU"
-                );
+                tracing::warn!("  SLOW sample_batch (>10ms) - data transfer may be on CPU");
             }
         }
 
         // Perform training step
         let train_start = std::time::Instant::now();
+        tracing::debug!(
+            "Calling train_step_gpu, batch.states.shape: {:?}",
+            batch.states.shape()
+        );
         let loss = self.train_step_gpu(&batch);
         let train_elapsed = train_start.elapsed();
+        tracing::debug!("train_step_gpu returned loss: {:.4}", loss);
 
         if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
-            println!(
-                "[STAGE:DIAG] train_step_gpu_native #{}: train_step_gpu took {:?} (loss={:.4})",
+            tracing::debug!(
+                "[STAGE:DIAG] train_step_gpu_native_with_config #{}: train_step_gpu took {:?} (loss={:.4})",
                 self.step_count(),
                 train_elapsed,
                 loss
@@ -158,16 +246,21 @@ pub trait GpuTrainable<B: AutodiffBackend> {
         // Update step count and target network
         self.increment_step_count();
         let step_count = self.step_count();
+        tracing::debug!(
+            "increment_step_count called, new step_count: {}",
+            step_count
+        );
         self.maybe_update_target(step_count);
 
         // Decay epsilon
         self.update_epsilon();
+        tracing::debug!("update_epsilon called, new epsilon: {:.4}", self.epsilon());
 
         // GPU DIAGNOSTIC: Total step timing
         let total_elapsed = step_start.elapsed();
         if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
-            println!(
-                "[STAGE:DIAG] train_step_gpu_native #{}: TOTAL took {:?} (sample={:?}, train={:?})",
+            tracing::debug!(
+                "[STAGE:DIAG] train_step_gpu_native_with_config #{}: TOTAL took {:?} (sample={:?}, train={:?})",
                 self.step_count(),
                 total_elapsed,
                 sample_elapsed,
@@ -178,6 +271,10 @@ pub trait GpuTrainable<B: AutodiffBackend> {
             FIRST_CALL.store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
+        tracing::debug!(
+            "train_step_gpu_native_with_config EXIT, returning Some({:.4})",
+            loss
+        );
         Some(loss)
     }
 
@@ -186,6 +283,30 @@ pub trait GpuTrainable<B: AutodiffBackend> {
     /// During warmup, returns the minimum of current buffer size
     /// and configured batch size. After warmup, returns full batch size.
     fn effective_batch_size(&mut self, config_batch_size: usize) -> usize {
+        // Use agent's warmup_batch_size for backward compatibility
+        self.effective_batch_size_with_config(config_batch_size, self.warmup_batch_size())
+    }
+
+    /// Get effective batch size with external warmup parameter.
+    ///
+    /// This allows the coordinator to override the agent's warmup_batch_size.
+    ///
+    /// During warmup, returns the minimum of current buffer size
+    /// and configured batch size. After warmup, returns full batch size.
+    ///
+    /// # Arguments
+    ///
+    /// * `config_batch_size` - Full batch size from configuration
+    /// * `warmup_batch_size` - Warmup batch size from coordinator (overrides agent's)
+    ///
+    /// # Returns
+    ///
+    /// Effective batch size to use for current training step
+    fn effective_batch_size_with_config(
+        &mut self,
+        config_batch_size: usize,
+        warmup_batch_size: usize,
+    ) -> usize {
         if self.is_warmup_complete() {
             return config_batch_size;
         }
@@ -193,14 +314,15 @@ pub trait GpuTrainable<B: AutodiffBackend> {
         // Check if we should complete warmup BEFORE calculating effective batch size
         if self.gpu_buffer().len() >= config_batch_size {
             self.set_warmup_complete(true);
-            println!(
-                "Warmup complete! Using full batch size: {}",
+            tracing::info!(
+                "[STAGE:WARMUP] Warmup complete! Using full batch size: {}",
                 config_batch_size
             );
             return config_batch_size;
         }
 
-        self.warmup_batch_size().min(config_batch_size)
+        // Use coordinator's warmup_batch_size, not agent's hardcoded value!
+        warmup_batch_size.min(config_batch_size)
     }
 }
 
@@ -228,6 +350,45 @@ pub fn train_step_with_warmup<B: AutodiffBackend, T: GpuTrainable<B>>(
     device: &B::Device,
 ) -> Option<f32> {
     let batch_size = agent.effective_batch_size(config_batch_size);
+
+    // Sample from GPU buffer
+    let batch = agent.gpu_buffer_mut().sample_batch(batch_size, device)?;
+
+    // Perform training step
+    let loss = agent.train_step_gpu(&batch);
+
+    // Update step count and target network
+    agent.increment_step_count();
+    let step_count = agent.step_count();
+    agent.maybe_update_target(step_count);
+
+    // Decay epsilon
+    agent.update_epsilon();
+
+    Some(loss)
+}
+
+/// Helper function for GPU-native training with coordinator-configured warmup.
+///
+/// This variant allows the coordinator to override the agent's warmup_batch_size,
+/// fixing the bug where hardcoded 256 was used instead of the configured value.
+///
+/// # Arguments
+/// * `agent` - Policy implementing GpuTrainable
+/// * `full_batch_size` - Full batch size from coordinator config
+/// * `warmup_batch_size` - Warmup batch size from coordinator config
+/// * `device` - GPU device
+///
+/// # Returns
+/// * `Some(loss)` if training occurred
+/// * `None` if buffer insufficient or skipped
+pub fn train_step_with_warmup_config<B: AutodiffBackend, T: GpuTrainable<B>>(
+    agent: &mut T,
+    full_batch_size: usize,
+    warmup_batch_size: usize,
+    device: &B::Device,
+) -> Option<f32> {
+    let batch_size = agent.effective_batch_size_with_config(full_batch_size, warmup_batch_size);
 
     // Sample from GPU buffer
     let batch = agent.gpu_buffer_mut().sample_batch(batch_size, device)?;
@@ -471,5 +632,101 @@ mod tests {
         assert_eq!(policy.step_count(), 1);
         // After training with full batch, warmup should be complete
         assert!(policy.is_warmup_complete());
+    }
+
+    #[test]
+    fn test_effective_batch_size_with_config_override() {
+        // Test that coordinator's warmup_batch_size overrides agent's hardcoded value
+        let mut policy = MockPolicy::new(2000, 10);
+        let full_batch_size = 1024;
+        let coordinator_warmup_batch_size = 1024; // Coordinator wants 1024
+        let agent_warmup_batch_size = policy.warmup_batch_size(); // Agent has 256
+
+        // Verify agent's default warmup size is 256
+        assert_eq!(agent_warmup_batch_size, 256);
+
+        // Initially not warmed up
+        assert!(!policy.is_warmup_complete());
+
+        // With old method, would use agent's 256
+        let old_batch_size = policy.effective_batch_size(full_batch_size);
+        assert_eq!(old_batch_size, agent_warmup_batch_size);
+
+        // With new method, uses coordinator's 1024
+        let new_batch_size =
+            policy.effective_batch_size_with_config(full_batch_size, coordinator_warmup_batch_size);
+        assert_eq!(new_batch_size, coordinator_warmup_batch_size);
+
+        // Verify coordinator's override is larger than agent's default
+        assert!(new_batch_size > old_batch_size);
+    }
+
+    #[test]
+    fn test_train_step_gpu_native_with_config() {
+        // Test that train_step_gpu_native_with_config uses coordinator's batch sizes
+        let mut policy = MockPolicy::new(2000, 10);
+        let full_batch_size = 1024;
+        let coordinator_warmup_batch_size = 1024;
+
+        // Fill buffer with coordinator's warmup_batch_size samples
+        for i in 0..coordinator_warmup_batch_size {
+            policy.gpu_buffer_mut().push(
+                vec![i as f32; 10],
+                0,
+                1.0,
+                vec![(i + 1) as f32; 10],
+                false,
+            );
+        }
+
+        let device = <NdArray as Backend>::Device::default();
+
+        // Call the new method with coordinator's batch sizes
+        let loss = policy.train_step_gpu_native_with_config(
+            0, // steps_since_last_train
+            &device,
+            coordinator_warmup_batch_size,
+            full_batch_size,
+        );
+
+        // Should train successfully
+        assert!(loss.is_some());
+        assert_eq!(loss.unwrap(), 0.5);
+
+        // Should have trained with coordinator's batch size (1024), not agent's (256)
+        assert_eq!(policy.step_count(), 1);
+    }
+
+    #[test]
+    fn test_train_step_with_warmup_config() {
+        // Test the helper function with coordinator's batch sizes
+        let mut policy = MockPolicy::new(2000, 10);
+        let full_batch_size = 1024;
+        let coordinator_warmup_batch_size = 1024;
+
+        // Fill buffer with coordinator's warmup_batch_size samples
+        for i in 0..coordinator_warmup_batch_size {
+            policy.gpu_buffer_mut().push(
+                vec![i as f32; 10],
+                0,
+                1.0,
+                vec![(i + 1) as f32; 10],
+                false,
+            );
+        }
+
+        let device = <NdArray as Backend>::Device::default();
+
+        // Use the new helper function
+        let loss = train_step_with_warmup_config(
+            &mut policy,
+            full_batch_size,
+            coordinator_warmup_batch_size,
+            &device,
+        );
+
+        assert!(loss.is_some());
+        assert_eq!(loss.unwrap(), 0.5);
+        assert_eq!(policy.step_count(), 1);
     }
 }
