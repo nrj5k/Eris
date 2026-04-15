@@ -18,6 +18,7 @@
 
 use crate::training::tensor_buffer::TensorTransitionBatch;
 use burn::tensor::backend::AutodiffBackend;
+use burnme_rly::warmup;
 use tracing;
 
 /// Trait for policies that support GPU-native training with TensorRingBuffer.
@@ -148,20 +149,18 @@ pub trait GpuTrainable<B: AutodiffBackend> {
             full_batch_size
         );
 
-        // Check training frequency (every 4 steps after warmup)
-        let should_train = if self.is_warmup_complete() {
-            tracing::debug!(
-                "Post-warmup: checking steps_since_last_train ({}) >= 4",
-                steps_since_last_train
-            );
-            steps_since_last_train >= 4
-        } else {
-            tracing::debug!(
-                "During warmup: training every step, buffer_len: {}",
-                self.gpu_buffer().len()
-            );
-            true // Train every step during warmup
-        };
+        // Check training frequency using lib's canonical should_train
+        let should_train = warmup::should_train(
+            self.is_warmup_complete(),
+            steps_since_last_train,
+            4, // train_frequency
+        );
+        tracing::debug!(
+            "should_train: {} (warmup_complete={}, steps_since_last_train={})",
+            should_train,
+            self.is_warmup_complete(),
+            steps_since_last_train
+        );
 
         if !should_train {
             tracing::debug!("train_step_gpu_native_with_config: SKIPPING (should_train=false)");
@@ -408,32 +407,8 @@ pub fn train_step_with_warmup_config<B: AutodiffBackend, T: GpuTrainable<B>>(
 }
 
 /// Check if training should occur based on warmup state.
-///
-/// During warmup: trains every step
-/// After warmup: trains every N steps (e.g., every 4)
-///
-/// # Arguments
-/// * `warmup_complete` - Whether warmup phase is complete
-/// * `steps_since_last_train` - Steps since last training
-/// * `train_frequency` - Training frequency after warmup
-///
-/// # Returns
-/// * `true` if training should occur
-/// * `false` otherwise
-pub fn should_train(
-    warmup_complete: bool,
-    steps_since_last_train: usize,
-    train_frequency: usize,
-) -> bool {
-    if !warmup_complete {
-        // Train every step during warmup
-        true
-    } else {
-        // Train every N steps after warmup
-        // steps_since_last_train == 0 means first step after warmup, should train
-        steps_since_last_train == 0 || steps_since_last_train >= train_frequency
-    }
-}
+/// Delegates to burnme-rly's canonical implementation.
+pub use burnme_rly::warmup::should_train;
 
 #[cfg(test)]
 mod tests {

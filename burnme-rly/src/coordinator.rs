@@ -23,6 +23,10 @@ pub struct TrainingConfig {
     pub checkpoint_interval: usize,
     /// Training frequency (train every N steps after warmup)
     pub train_frequency: usize,
+    /// How often to log progress (in steps). Default: 1000
+    pub progress_interval: usize,
+    /// Whether to use parallel environment stepping (default: false, sequential fallback)
+    pub use_parallel: bool,
 }
 
 impl TrainingConfig {
@@ -35,6 +39,8 @@ impl TrainingConfig {
             warmup_batch_size: 256.min(batch_size),
             checkpoint_interval: 10,
             train_frequency: 4,
+            progress_interval: 1000,
+            use_parallel: false,
         }
     }
 
@@ -53,6 +59,18 @@ impl TrainingConfig {
     /// Set training frequency.
     pub fn with_train_frequency(mut self, frequency: usize) -> Self {
         self.train_frequency = frequency;
+        self
+    }
+
+    /// Set progress interval (how often to log in steps).
+    pub fn with_progress_interval(mut self, interval: usize) -> Self {
+        self.progress_interval = interval;
+        self
+    }
+
+    /// Enable parallel environment stepping.
+    pub fn with_parallel(mut self) -> Self {
+        self.use_parallel = true;
         self
     }
 
@@ -90,6 +108,10 @@ pub struct TrainingMetrics {
     pub final_loss: f32,
     /// Total training time (if measured)
     pub training_time_secs: Option<f64>,
+    /// Throughput metric: steps per second (if measured)
+    pub steps_per_second: Option<f64>,
+    /// Best single-episode reward seen during training
+    pub best_reward: f64,
 }
 
 /// Generic GPU training coordinator based on Metis VecEnv implementation.
@@ -163,6 +185,7 @@ impl GpuTrainingCoordinator {
         let mut episode_count = 0usize;
         let mut total_steps = 0usize;
         let mut episode_rewards: Vec<f64> = Vec::new();
+        let mut best_reward: f64 = f64::NEG_INFINITY;
         let mut total_loss = 0.0f32;
         let mut train_steps = 0usize;
         let mut steps_since_last_train: usize = 0;
@@ -186,7 +209,11 @@ impl GpuTrainingCoordinator {
                 agent.select_actions_batched(&observations, device, action_dim, agent.epsilon());
 
             // Environment stepping
-            let step_results = env.step_all(actions)?;
+            let step_results = if self.config.use_parallel {
+                env.step_all_parallel(actions)?
+            } else {
+                env.step_all(actions)?
+            };
 
             // Reset done environments
             let reset_obs = env.reset_done_environments(&step_results)?;
@@ -264,6 +291,9 @@ impl GpuTrainingCoordinator {
                 if result.done {
                     episode_count += 1;
                     episode_rewards.push(env_cumulative_rewards[i]);
+                    if env_cumulative_rewards[i] > best_reward {
+                        best_reward = env_cumulative_rewards[i];
+                    }
                     env_cumulative_rewards[i] = 0.0;
                     env_steps[i] = 0;
                 }
@@ -278,6 +308,18 @@ impl GpuTrainingCoordinator {
                     Ok(_) => log::info!("Saved checkpoint: {}", checkpoint_path),
                     Err(e) => log::error!("Failed to save checkpoint: {}", e),
                 }
+            }
+
+            // Progress logging
+            if total_steps > 0 && total_steps.is_multiple_of(self.config.progress_interval) {
+                log::info!(
+                    "[STAGE:STATS] Steps: {} | Episodes: {} | Best reward: {:.2} | Avg loss: {:.4} | Epsilon: {:.3}",
+                    total_steps,
+                    episode_count,
+                    best_reward,
+                    if train_steps > 0 { total_loss / train_steps as f32 } else { 0.0 },
+                    agent.epsilon()
+                );
             }
         }
 
@@ -308,7 +350,43 @@ impl GpuTrainingCoordinator {
             avg_reward,
             final_loss,
             training_time_secs: None,
+            steps_per_second: None,
+            best_reward,
         })
+    }
+
+    /// Run training with timing, returning metrics including steps_per_second.
+    ///
+    /// Wraps `run_training()` with `std::time::Instant` measurement.
+    /// Populates both `training_time_secs` and `steps_per_second` fields.
+    ///
+    /// # Arguments
+    /// Same as `run_training()`.
+    ///
+    /// # Returns
+    /// Training metrics with timing information populated.
+    pub fn run_training_timed<A, E, B>(
+        &self,
+        agent: &mut A,
+        env: &mut E,
+        device: &B::Device,
+        checkpoint_prefix: &str,
+    ) -> Result<TrainingMetrics, Box<dyn Error>>
+    where
+        A: GpuTrainable<B> + BatchedActionSelector<B>,
+        E: VecEnvironment,
+        B: AutodiffBackend,
+    {
+        let start = std::time::Instant::now();
+        let mut metrics = self.run_training(agent, env, device, checkpoint_prefix)?;
+        let elapsed = start.elapsed().as_secs_f64();
+
+        metrics.training_time_secs = Some(elapsed);
+        if elapsed > 0.0 {
+            metrics.steps_per_second = Some(metrics.total_steps as f64 / elapsed);
+        }
+
+        Ok(metrics)
     }
 }
 
@@ -335,6 +413,8 @@ mod tests {
             avg_reward: 15.5,
             final_loss: 0.25,
             training_time_secs: Some(60.0),
+            steps_per_second: None,
+            best_reward: 0.0,
         };
 
         assert_eq!(metrics.total_steps, 1000);

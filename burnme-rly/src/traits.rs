@@ -181,6 +181,12 @@ pub trait GpuTrainable<B: AutodiffBackend> {
     /// Get full batch size for training.
     fn batch_size(&self) -> usize;
 
+    /// Get full batch size for training (alias for batch_size).
+    /// Used by coordinator to determine warmup completion threshold.
+    fn full_batch_size(&self) -> usize {
+        self.batch_size()
+    }
+
     /// Get target network update frequency.
     fn target_update_freq(&self) -> usize;
 
@@ -194,9 +200,23 @@ pub trait GpuTrainable<B: AutodiffBackend> {
     /// Called after each training step.
     fn decay_exploration(&mut self);
 
+    /// Update exploration parameter (alias for decay_exploration).
+    /// Called after each training step by the coordinator.
+    fn update_epsilon(&mut self) {
+        self.decay_exploration();
+    }
+
     /// Update target network weights from policy network.
     /// Called periodically based on `target_update_freq()`.
     fn update_target_network(&mut self);
+
+    /// Update target network if step count is a multiple of target_update_freq.
+    /// Convenience method that combines step_count() and update_target_network().
+    fn maybe_update_target(&mut self) {
+        if self.step_count() % self.target_update_freq() == 0 {
+            self.update_target_network();
+        }
+    }
 
     /// Save model checkpoint to path.
     ///
@@ -235,6 +255,34 @@ pub trait GpuTrainableExt<B: AutodiffBackend>: GpuTrainable<B> {
         // Check if we should complete warmup
         let buffer_len: usize = self.buffer_len();
         if buffer_len >= self.batch_size() {
+            self.set_warmup_complete(true);
+        }
+
+        effective
+    }
+
+    /// Get effective batch size with coordinator-provided config override.
+    ///
+    /// This variant allows the coordinator to override the agent's warmup_batch_size,
+    /// fixing the bug where the agent's default was used instead of the coordinator's config.
+    ///
+    /// # Arguments
+    /// * `full_batch_size` - Full batch size from coordinator config
+    /// * `warmup_batch_size` - Warmup batch size from coordinator config
+    fn effective_batch_size_with_config(
+        &mut self,
+        full_batch_size: usize,
+        warmup_batch_size: usize,
+    ) -> usize {
+        if self.is_warmup_complete() {
+            return full_batch_size;
+        }
+
+        let effective = warmup_batch_size.min(full_batch_size);
+
+        // Check if we should complete warmup
+        let buffer_len: usize = self.buffer_len();
+        if buffer_len >= full_batch_size {
             self.set_warmup_complete(true);
         }
 
@@ -399,6 +447,10 @@ mod tests {
             512
         }
 
+        fn full_batch_size(&self) -> usize {
+            512
+        }
+
         fn target_update_freq(&self) -> usize {
             1000
         }
@@ -415,7 +467,15 @@ mod tests {
             // No-op for mock
         }
 
+        fn update_epsilon(&mut self) {
+            // No-op for mock
+        }
+
         fn update_target_network(&mut self) {
+            // No-op for mock
+        }
+
+        fn maybe_update_target(&mut self) {
             // No-op for mock
         }
 
@@ -465,5 +525,22 @@ mod tests {
         assert_eq!(agent.target_update_freq(), 1000);
         assert!((agent.learning_rate() - 0.001).abs() < f32::EPSILON);
         assert!((agent.gamma() - 0.99).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_effective_batch_size_with_config_warmup() {
+        let mut agent = MockAgent::<TestBackend>::new();
+        // During warmup: should use warmup_batch_size from config
+        let batch_size = agent.effective_batch_size_with_config(512, 128);
+        assert_eq!(batch_size, 128);
+    }
+
+    #[test]
+    fn test_effective_batch_size_with_config_post_warmup() {
+        let mut agent = MockAgent::<TestBackend>::new();
+        agent.set_warmup_complete(true);
+        // After warmup: should use full_batch_size from config
+        let batch_size = agent.effective_batch_size_with_config(512, 128);
+        assert_eq!(batch_size, 512);
     }
 }

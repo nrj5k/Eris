@@ -145,38 +145,7 @@ pub fn compute_td_loss<B: AutodiffBackend>(
     dones: &Tensor<B, 2>,
     gamma: f32,
 ) -> Tensor<B, 1> {
-    // Get device early before consuming q_values
-    let device = q_values.device();
-    let batch_size = rewards.shape().dims[0];
-
-    // Step 1: Gather Q-values for taken actions
-    // q_values: [batch_size, action_dim]
-    // actions: [batch_size, 1]
-    // current_q: [batch_size, 1]
-    let current_q = q_values.gather(1, actions.clone());
-
-    // Step 2: Compute max Q from target network
-    // max_next_q: [batch_size, 1]
-    // max_dim(1) returns max along action dimension, keepdim preserves shape
-    let max_next_q = target_q_values.max_dim(1);
-
-    // Step 3: Compute TD target
-    // TD target = r + gamma * max_next_q * (1 - done)
-    // When done=true (1.0), the term becomes 0 (no future reward)
-    // When done=false (0.0), the term becomes gamma * max_next_q
-    let target_q = rewards.clone()
-        + Tensor::full([batch_size, 1], gamma, &device)
-            * max_next_q
-            * (Tensor::ones_like(dones) - dones.clone());
-
-    // Step 4: Compute squared TD error
-    // We detach target_q to prevent gradient flow to target network
-    // The policy network learns to predict Q-values close to target
-    let diff = current_q - target_q.detach();
-    let squared = diff.powf_scalar(2.0);
-
-    // Step 5: Return mean loss
-    squared.mean()
+    burnme_rly::compute_td_loss(q_values, target_q_values, actions, rewards, dones, gamma)
 }
 
 /// Compute Double DQN temporal difference loss.
@@ -279,39 +248,15 @@ pub fn compute_double_dqn_loss<B: AutodiffBackend>(
     dones: &Tensor<B, 2>,
     gamma: f32,
 ) -> Tensor<B, 1> {
-    // Get device early before consuming q_values
-    let device = q_values.device();
-    let batch_size = rewards.shape().dims[0];
-
-    // Step 1: Gather Q-values for taken actions from policy network
-    // current_q: [batch_size, 1]
-    let current_q = q_values.gather(1, actions.clone());
-
-    // Step 2: Select best actions using policy network
-    // argmax(1) selects best action along action dimension
-    // best_actions: [batch_size, 1] (integer indices)
-    let best_actions = next_q_policy.argmax(1);
-
-    // Step 3: Evaluate selected actions using target network
-    // This is the key Double DQN step: use target network to evaluate
-    // the actions selected by policy network
-    // max_next_q: [batch_size, 1]
-    let max_next_q = next_q_target.gather(1, best_actions);
-
-    // Step 4: Compute TD target
-    // target = reward + gamma * target_q * (1 - done)
-    let target_q = rewards.clone()
-        + Tensor::full([batch_size, 1], gamma, &device)
-            * max_next_q
-            * (Tensor::ones_like(dones) - dones.clone());
-
-    // Step 5: Compute squared error
-    // Detach target to prevent gradient flow to target network
-    let diff = current_q - target_q.detach();
-    let squared = diff.powf_scalar(2.0);
-
-    // Step 6: Return mean loss
-    squared.mean()
+    burnme_rly::compute_double_dqn_loss_rank2(
+        q_values,
+        next_q_policy,
+        next_q_target,
+        actions,
+        rewards,
+        dones,
+        gamma,
+    )
 }
 
 #[cfg(test)]
