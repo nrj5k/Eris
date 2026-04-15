@@ -58,67 +58,6 @@ pub fn available_backends() -> Vec<&'static str> {
     backends
 }
 
-/// Create device based on backend string
-pub fn create_device(backend: &str) -> Box<dyn std::any::Any> {
-    match backend {
-        #[cfg(feature = "cpu")]
-        "cpu" | "ndarray" => {
-            println!("Creating NdArray CPU device...");
-            use burn::backend::NdArray;
-            let device = burn::backend::ndarray::NdArrayDevice::Cpu;
-            Box::new(device)
-        }
-
-        #[cfg(feature = "wgpu")]
-        "gpu" | "wgpu" => {
-            println!("Creating Wgpu GPU device...");
-
-            let device = burn::backend::wgpu::WgpuDevice::DiscreteGpu(0);
-            Box::new(device)
-        }
-
-        #[cfg(feature = "cuda")]
-        "cuda" | "nvidia" => {
-            println!("Creating CUDA device...");
-            use burn::backend::Cuda;
-            let device = burn::backend::cuda::CudaDevice::new(0);
-            Box::new(device)
-        }
-
-        #[cfg(feature = "rocm")]
-        "rocm" | "amd" => {
-            println!("Creating ROCm device...");
-            use burn::backend::Rocm;
-            let device = burn::backend::rocm::RocmDevice::new(0);
-            Box::new(device)
-        }
-
-        _ => {
-            #[cfg(feature = "cpu")]
-            let available = "cpu";
-            #[cfg(feature = "wgpu")]
-            let available = "wgpu";
-            #[cfg(feature = "cuda")]
-            let available = "cuda";
-            #[cfg(feature = "rocm")]
-            let available = "rocm";
-            #[cfg(not(any(
-                feature = "cpu",
-                feature = "wgpu",
-                feature = "cuda",
-                feature = "rocm"
-            )))]
-            let available = "none";
-
-            eprintln!(
-                "Backend '{}' not compiled. Available: {}",
-                backend, available
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
 /// Check if a backend is available
 pub fn is_backend_available(backend: &str) -> bool {
     match backend {

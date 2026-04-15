@@ -5,7 +5,7 @@ use crate::features::{AccessRecord, AccessTracker, BlobFeatures, HotnessConfig};
 use crate::models::decode_action;
 use crate::space::{BoxSpace, DiscreteSpace};
 use crate::tier::BufferEnv;
-use crate::trace::{BlobData, TraceData, TraceReader};
+use crate::trace::{BlobData, TraceData, TraceFormat, TraceReader};
 use std::sync::Arc;
 
 /// Worst case latency (tape) for normalization
@@ -61,7 +61,8 @@ impl IOBufferEnv {
     ///
     /// # Arguments
     /// * `config_path` - Path to tier configuration TOML file
-    /// * `trace_path` - Path to CSV trace file
+    /// * `trace_path` - Path to trace file (CSV or other formats)
+    /// * `format` - Format of the trace file (e.g., CSV, Parquet, Autodetect)
     /// * `max_steps` - Maximum steps per episode
     /// * `max_blob_size` - Optional max blob size for normalization (default: 2_000_000.0)
     /// * `max_frequency` - Optional max access frequency for normalization (default: 100)
@@ -71,6 +72,7 @@ impl IOBufferEnv {
     pub fn new(
         config_path: &std::path::Path,
         trace_path: &std::path::Path,
+        format: TraceFormat,
         max_steps: usize,
         max_blob_size: Option<f64>,
         max_frequency: Option<u32>,
@@ -79,7 +81,7 @@ impl IOBufferEnv {
         use rand::SeedableRng;
 
         let config = Config::from_file(config_path)?;
-        let trace = TraceReader::from_csv(trace_path)?;
+        let trace = TraceReader::from_path(trace_path, format)?;
 
         // Report loading statistics
         println!(
@@ -552,7 +554,15 @@ mod tests {
             return None;
         }
 
-        IOBufferEnv::new(config_path, trace_path, 100, None, None).ok()
+        IOBufferEnv::new(
+            config_path,
+            trace_path,
+            TraceFormat::Autodetect,
+            100,
+            None,
+            None,
+        )
+        .ok()
     }
 
     #[test]

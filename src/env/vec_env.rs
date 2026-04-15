@@ -5,7 +5,7 @@
 
 use crate::env::{Environment, IOBufferEnv, Info, StepResult};
 use crate::space::{DiscreteSpace, Space};
-use crate::trace::TraceReader;
+use crate::trace::{TraceFormat, TraceReader};
 use crate::training::VecEnvironment;
 use std::error::Error;
 use std::path::Path;
@@ -25,17 +25,19 @@ impl VecEnv {
     /// # Arguments
     /// * `num_envs` - Number of parallel environments
     /// * `config_path` - Path to tier config TOML
-    /// * `trace_path` - Path to trace CSV file
+    /// * `trace_path` - Path to trace file (CSV or other formats)
+    /// * `format` - Format of the trace file (e.g., CSV, Parquet, Autodetect)
     /// * `max_steps` - Maximum steps per episode
     pub fn new(
         num_envs: usize,
         config_path: &Path,
         trace_path: &Path,
+        format: TraceFormat,
         max_steps: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Load trace ONCE (shared across all environments)
         println!("Loading trace file once for {} environments...", num_envs);
-        let trace_reader = TraceReader::from_csv(trace_path)
+        let trace_reader = TraceReader::from_path(trace_path, format)
             .map_err(|e| format!("Failed to load trace: {}", e))?;
 
         // Get shared data from the first reader

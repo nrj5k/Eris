@@ -951,6 +951,8 @@ name = "burnme-rly"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "chrono",
+ "criterion",
  "env_logger",
  "log",
  "rand 0.10.0",
@@ -2434,6 +2436,7 @@ dependencies = [
  "clap",
  "criterion",
  "csv",
+ "flate2",
  "gymnasia",
  "hashbrown 0.16.1",
  "indicatif",

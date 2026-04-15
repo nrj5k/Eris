@@ -177,6 +177,8 @@ use crate::config::DQNConfig;
 use crate::models::QNetwork;
 use crate::training::tensor_buffer::TensorTransitionBatch;
 use crate::training::HybridRingBuffer;
+use crate::utils::backend_diagnostics::log_backend_info;
+use crate::utils::timing::{log_step_timing, OneTimeDiag};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor};
@@ -311,29 +313,7 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
     /// # Returns
     /// Initialized policy with random weights and empty replay buffer
     pub fn new(config: DQNExplorerConfig, device: B::Device) -> Self {
-        // GPU DIAGNOSTIC: Log backend type at policy creation
-        let backend_name = std::any::type_name::<B>();
-        tracing::debug!("[STAGE:DIAG] DQNPolicy::new() GPU DIAGNOSTIC:");
-        tracing::debug!("   Backend type: {}", backend_name);
-        tracing::debug!("   Device: {:?}", device);
-        tracing::debug!(
-            "   Input dim: {}, Action dim: {}",
-            config.dqn_config.input_dim,
-            config.dqn_config.action_dim
-        );
-
-        // Detect if we're accidentally on CPU
-        if backend_name.contains("NdArray") {
-            tracing::warn!(
-                "   [STAGE:FAIL] WARNING: Backend is NdArray (CPU)! GPU training will NOT happen!"
-            );
-        } else if backend_name.contains("Cuda") {
-            tracing::debug!("   [STAGE:OK] Backend is CUDA. GPU training should work.");
-        } else if backend_name.contains("Wgpu") {
-            tracing::debug!("   [STAGE:WARN]  Backend is WGPU. GPU training via WebGPU.");
-        } else if backend_name.contains("Rocm") {
-            tracing::debug!("   [STAGE:OK] Backend is ROCm. GPU training should work.");
-        }
+        log_backend_info::<B>("DQNPolicy::new", &device);
 
         // Initialize Q-network
         let q_network = config.dqn_config.init(&device);
@@ -355,10 +335,10 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
             let _ = _test_output.into_data(); // Force GPU sync
             let bench_elapsed = bench_start.elapsed();
             tracing::debug!(
-                "   [STAGE:DIAG] q_network forward pass (initialization): {:?}",
+                "q_network forward pass (initialization): {:?}",
                 bench_elapsed
             );
-            tracing::debug!("   [STAGE:DIAG]   → GPU typically <1ms, CPU typically 1-10ms");
+            tracing::debug!("  → GPU typically <1ms, CPU typically 1-10ms");
         }
 
         // Initialize GPU-native replay buffer
@@ -433,11 +413,19 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
         next_states: &Tensor<B, 2>,
         dones: &Tensor<B, 2>,
     ) -> f32 {
+        tracing::trace!("train_dqn_step ENTRY, states shape: {:?}", states.shape());
+
         // Get Q-values from networks
+        tracing::debug!("Calling q_network.forward(states)");
         let q_values = self.q_network.forward(states.clone());
+        tracing::debug!("q_values shape: {:?}", q_values.shape());
+
+        tracing::debug!("Calling target_network.forward(next_states)");
         let next_q_values = self.target_network.forward(next_states.clone());
+        tracing::trace!("next_q_values shape: {:?}", next_q_values.shape());
 
         // Use shared TD loss computation
+        tracing::debug!("Calling compute_td_loss");
         let loss = compute_td_loss(
             q_values,
             next_q_values,
@@ -446,21 +434,28 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
             dones,
             self.config.gamma,
         );
+        tracing::debug!("loss tensor shape: {:?}", loss.shape());
 
         // Perform backpropagation and update weights
+        tracing::debug!("Calling loss.backward() - THIS TRIGGERS GPU WORK!");
         let grads = loss.backward();
+        tracing::debug!("backward() COMPLETE, got gradients");
         let grads_params = GradientsParams::from_grads(grads, &self.q_network);
 
         // Update Q-network with optimizer
+        tracing::debug!("Calling optimizer.step()");
         let mut optimizer = self.optimizer_config.init();
         self.q_network = optimizer.step(
             self.config.learning_rate as f64,
             self.q_network.clone(),
             grads_params,
         );
+        tracing::debug!("optimizer.step() COMPLETE");
 
         // Extract scalar loss value
-        loss.into_data().convert::<f32>().as_slice().unwrap()[0]
+        let loss_data = loss.into_data().convert::<f32>().as_slice().unwrap()[0];
+        tracing::debug!("train_dqn_step EXIT, loss: {:.4}", loss_data);
+        loss_data
     }
 
     /// Update target network by copying weights from Q-network
@@ -664,70 +659,24 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
     }
 
     fn train_step_gpu(&mut self, batch: &TensorTransitionBatch<B>) -> f32 {
-        // [STAGE:CRITICAL] DEBUG: Backend type verification and timing
-        let backend_name = std::any::type_name::<B>();
+        static DIAG: OneTimeDiag = OneTimeDiag::new();
+
+        if DIAG.should_print() {
+            log_backend_info::<B>("DQNPolicy::train_step_gpu", &self.device);
+        }
+
         tracing::trace!(
-            "[STAGE:CRITICAL] train_step_gpu() backend: {}",
-            backend_name
+            "train_step_gpu ENTRY, batch_size: {}, step_count: {}",
+            batch.states.dims()[0],
+            self.step_count
         );
-
-        if backend_name.contains("Cuda") {
-            tracing::trace!("[STAGE:CRITICAL] ✓ Running on CUDA");
-        } else if backend_name.contains("Wgpu") {
-            tracing::trace!("[STAGE:CRITICAL] ✓ Running on WGPU");
-        } else if backend_name.contains("NdArray") {
-            tracing::trace!("[STAGE:CRITICAL] ✗ Running on CPU (NdArray)!");
-        } else {
-            tracing::trace!("[STAGE:CRITICAL] ? Unknown backend: {}", backend_name);
-        }
-
-        // Time the forward pass
-        let forward_start = std::time::Instant::now();
-        let _q_values = self.q_network.forward(batch.states.clone());
-        let forward_time = forward_start.elapsed();
-        tracing::trace!(
-            "[STAGE:CRITICAL] Q-network forward took: {:?}",
-            forward_time
-        );
-
-        // GPU should be < 5ms, CPU might be > 50ms
-        if forward_time.as_millis() > 10 {
-            tracing::warn!("[STAGE:WARN] Forward pass is slow - likely CPU!");
-        } else {
-            tracing::trace!("[STAGE:OK] Forward pass is fast - likely GPU!");
-        }
-
-        // GPU DIAGNOSTIC: Verify backend type and measure timing
-        // This is a one-time warning, not per-step logging
-        static GPU_DIAGNOSTIC_PRINTED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        let should_print_diag = !GPU_DIAGNOSTIC_PRINTED.load(std::sync::atomic::Ordering::Relaxed);
-
-        if should_print_diag {
-            let backend_name = std::any::type_name::<B>();
-            tracing::debug!("[STAGE:DIAG] train_step_gpu DIAGNOSTIC (first call):");
-            tracing::debug!("   Backend type: {}", backend_name);
-            tracing::debug!("   Device: {:?}", self.device);
-            tracing::debug!("   batch.states shape: {:?}", batch.states.shape());
-            tracing::debug!("   batch.states dims: {:?}", batch.states.dims());
-
-            if backend_name.contains("NdArray") {
-                tracing::debug!(
-                    "   [STAGE:FAIL] CRITICAL: Backend is NdArray (CPU)! Training on CPU, not GPU!"
-                );
-            } else if backend_name.contains("Cuda") {
-                tracing::debug!("   [STAGE:OK] Backend is CUDA. Training on GPU.");
-            } else if backend_name.contains("Wgpu") {
-                tracing::debug!("   [STAGE:WARN]  Backend is WGPU. Training on WebGPU.");
-            }
-            GPU_DIAGNOSTIC_PRINTED.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
 
         // Time the training step (periodically, every 100 steps)
         let train_start = std::time::Instant::now();
 
         // Train DQN using GPU tensors directly (no CPU conversion)
         // Clone tensors since we need to reshape without consuming
+        tracing::trace!("Reshaping actions, shape: {:?}", batch.actions.shape());
         let actions_2d = batch
             .actions
             .clone()
@@ -743,7 +692,17 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
             .clone()
             .unsqueeze::<3>()
             .reshape([batch.states.dims()[0], 1]);
+        tracing::trace!(
+            "Reshaped actions: {:?}, rewards: {:?}, dones: {:?}",
+            actions_2d.shape(),
+            rewards_2d.shape(),
+            dones_2d.shape()
+        );
 
+        tracing::debug!(
+            "Calling train_dqn_step, states shape: {:?}",
+            batch.states.shape()
+        );
         let loss = self.train_dqn_step(
             &batch.states,
             &actions_2d,
@@ -751,27 +710,12 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
             &batch.next_states,
             &dones_2d,
         );
+        tracing::debug!("train_dqn_step returned loss: {:.4}", loss);
 
-        // GPU DIAGNOSTIC: Periodically report training step timing
-        // NOTE: step_count, target network updates, and epsilon decay are handled by
-        // the caller (train_step_gpu_native in gpu_trainable.rs or the coordinator)
         let train_elapsed = train_start.elapsed();
-        if self.step_count <= 3 || self.step_count % 500 == 0 {
-            tracing::debug!(
-                "[STAGE:DIAG] train_step_gpu #{}: {:?} (loss={:.4})",
-                self.step_count,
-                train_elapsed,
-                loss
-            );
-            // GPU: training step < 50ms for batch_size=2048
-            // CPU: training step > 100ms for batch_size=2048
-            if train_elapsed.as_millis() > 100 {
-                tracing::warn!(
-                    "   [STAGE:WARN]  SLOW training step (>100ms) - may indicate CPU backend!"
-                );
-            }
-        }
+        log_step_timing(self.step_count, "train_step_gpu", train_elapsed, 100);
 
+        tracing::debug!("train_step_gpu EXIT, loss: {:.4}", loss);
         loss
     }
 

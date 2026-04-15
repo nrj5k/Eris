@@ -116,6 +116,7 @@ pub mod space;
 pub mod tier;
 pub mod trace;
 pub mod training;
+pub mod utils;
 
 // Re-exports for convenience
 // Config
@@ -148,7 +149,10 @@ pub use env::{Environment, Info, StepResult};
 pub use tier::{BufferEnv, Tier, TierSelector};
 
 // Trace
-pub use trace::{BlobData, IoOp, TraceReader};
+pub use trace::{
+    parse_pfw_gz, BlobData, DfTracerConverter, DfTracerEvent, DfTracerEventType, DfTracerMetadata,
+    IoOp, TraceFormat, TraceReader,
+};
 
 // Training
 pub use training::{

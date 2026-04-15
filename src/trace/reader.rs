@@ -5,6 +5,18 @@ use crate::trace::BlobData;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Trace file format for auto-detection
+#[derive(Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum TraceFormat {
+    /// Auto-detect from file extension (.csv → recorder, .pfw.gz/.pfw → dftracer)
+    #[default]
+    Autodetect,
+    /// Recorder CSV format (eris CSV trace files)
+    Recorder,
+    /// DFTracer .pfw.gz format (Chrome Trace Event)
+    Dftracer,
+}
+
 /// Shared trace data loaded once and shared across environments
 #[derive(Debug, Clone)]
 pub struct TraceData {
@@ -62,10 +74,7 @@ impl TraceReader {
                 }
                 Err(e) => {
                     skipped_rows += 1;
-                    eprintln!(
-                        "[STAGE:WARN]  Warning: Skipping malformed row {}: {}",
-                        row_num, e
-                    );
+                    eprintln!("Warning: Skipping malformed row {}: {}", row_num, e);
 
                     // Log first few errors in detail
                     if skipped_rows <= 5 {
@@ -93,7 +102,7 @@ impl TraceReader {
         // Warn if significantly fewer rows than expected
         if loaded_rows < expected_rows.saturating_sub(10) {
             eprintln!(
-                "[STAGE:WARN]  Warning: Expected ~{} rows, but only loaded {}",
+                "Warning: Expected ~{} rows, but only loaded {}",
                 expected_rows, loaded_rows
             );
             eprintln!("   ({} rows skipped due to errors)", skipped_rows);
@@ -103,7 +112,7 @@ impl TraceReader {
         if skipped_rows > 0 {
             let percentage = (skipped_rows as f64 / (skipped_rows + loaded_rows) as f64) * 100.0;
             eprintln!(
-                "[STAGE:WARN]  Warning: Skipped {} rows ({:.1}%)",
+                "Warning: Skipped {} rows ({:.1}%)",
                 skipped_rows, percentage
             );
         }
@@ -123,6 +132,88 @@ impl TraceReader {
             data,
             current_idx: 0,
         })
+    }
+
+    /// Create a new trace reader from a DFTracer `.pfw.gz` file.
+    ///
+    /// Parses the gzipped Chrome Trace Event JSON, extracts POSIX I/O events,
+    /// resolves file hash to path mappings, and converts to BlobData records.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the `.pfw.gz` file
+    ///
+    /// # Errors
+    /// Returns error if file cannot be read, decompressed, parsed, or contains no I/O events.
+    pub fn from_pfw(path: &Path) -> Result<Self> {
+        use crate::trace::dftracer::{
+            extract_io_events, parse_pfw_gz, DfTracerConverter, DfTracerMetadata,
+        };
+
+        let values = parse_pfw_gz(path)?;
+        let metadata = DfTracerMetadata::extract(&values);
+        let events = extract_io_events(&values);
+
+        println!(
+            "✓ DFTracer: extracted {} I/O events from {}",
+            events.len(),
+            path.display()
+        );
+
+        let converter = DfTracerConverter::new(events, metadata);
+        let records = converter.convert();
+
+        if records.is_empty() {
+            return Err(EnvError::DfTracerError(
+                "No I/O data events found in pfw trace".into(),
+            ));
+        }
+
+        let records_len = records.len();
+        println!(
+            "✓ Successfully converted {} blob records from DFTracer trace",
+            records_len
+        );
+
+        let data = Arc::new(TraceData {
+            records: Arc::new(records),
+            total_rows: records_len,
+            skipped_rows: 0,
+        });
+
+        Ok(Self {
+            data,
+            current_idx: 0,
+        })
+    }
+
+    /// Load a trace file with format auto-detection or explicit format specification.
+    ///
+    /// # Format auto-detection rules (TraceFormat::Autodetect):
+    /// - `.csv` → Recorder (CSV)
+    /// - `.pfw.gz` or `.pfw` → DFTracer
+    /// - Other → returns error
+    ///
+    /// # Arguments
+    /// * `path` - Path to the trace file
+    /// * `format` - Trace format (Recorder, Dftracer, or Autodetect)
+    pub fn from_path(path: &Path, format: TraceFormat) -> Result<Self> {
+        match format {
+            TraceFormat::Recorder => Self::from_csv(path),
+            TraceFormat::Dftracer => Self::from_pfw(path),
+            TraceFormat::Autodetect => {
+                let path_str = path.to_string_lossy();
+                if path_str.ends_with(".pfw.gz") || path_str.ends_with(".pfw") {
+                    Self::from_pfw(path)
+                } else if path_str.ends_with(".csv") {
+                    Self::from_csv(path)
+                } else {
+                    Err(EnvError::DfTracerError(format!(
+                        "Cannot auto-detect trace format for '{}' (expected .csv, .pfw.gz, or .pfw)",
+                        path.display()
+                    )))
+                }
+            }
+        }
     }
 
     /// Create trace reader from shared trace data (for VecEnv).

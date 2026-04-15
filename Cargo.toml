@@ -49,6 +49,7 @@ burn = { version = "0.20", default-features = false }
 chrono = "0.4.44"
 clap = { version = "4", features = ["derive"] }
 csv = "1.4.0"
+flate2 = "1.1"
 gymnasia = "2.0.0"
 hashbrown = "0.16.1"
 indicatif = "0.18"

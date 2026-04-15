@@ -1,23 +1,28 @@
 //! Metis: Combined DQN + Contextual Bandit Policy
 //!
 //! Refactored to implement CachePolicy trait using existing CombinedModel infrastructure
+//! Migrated to use GpuTrainable + GpuTrainingCoordinator pattern
 
 use super::exploration::{ExplorationConfig, ExplorationStrategy};
 use super::policy::*;
 use super::tensor_utils::{batch_to_tensors, state_to_tensor};
 use crate::config::CombinedBanditDQNConfig;
 use crate::models::CombinedModel;
+use crate::training::checkpoint::{CheckpointMetadata, CheckpointMetadataExt, Checkpointable};
+use crate::training::gpu_coordinator::BatchedActionSelector;
+use crate::training::tensor_buffer::TensorTransitionBatch;
+use crate::training::{GpuTrainable, HybridRingBuffer};
 use burn::tensor::backend::AutodiffBackend;
-use burn::tensor::{Int, Tensor};
+use burn::tensor::{Distribution, Int, Tensor};
 use std::error::Error;
 use std::path::Path;
 
 /// Metis Policy - Combined DQN + Bandit using existing model infrastructure
 pub struct MetisPolicy<B: AutodiffBackend> {
     /// Policy network (online network)
-    model: CombinedModel<B>,
+    pub model: CombinedModel<B>,
     /// Target network (frozen copy)
-    target_model: CombinedModel<B>,
+    pub target_model: CombinedModel<B>,
     /// Exploration strategy
     explorer: Box<dyn ExplorationStrategy<B>>,
     /// Configuration
@@ -26,6 +31,14 @@ pub struct MetisPolicy<B: AutodiffBackend> {
     device: B::Device,
     /// Training step counter
     step_count: usize,
+    /// GPU replay buffer for batch training
+    pub gpu_buffer: HybridRingBuffer<B>,
+    /// Warmup batch size (starts small, ramps up to full batch)
+    pub warmup_batch_size: usize,
+    /// Full batch size for training
+    pub full_batch_size: usize,
+    /// Whether warmup phase is complete
+    pub warmup_complete: bool,
 }
 
 /// Configuration for Metis
@@ -51,6 +64,8 @@ pub struct MetisConfig {
     pub target_update_freq: usize,
     /// Batch size
     pub batch_size: usize,
+    /// Replay buffer capacity
+    pub buffer_capacity: usize,
     /// Exploration strategy configuration
     pub exploration: ExplorationConfig,
 }
@@ -68,6 +83,7 @@ impl Default for MetisConfig {
             epsilon_decay: 0.995,
             target_update_freq: 1000,
             batch_size: 2048, // Optimized for GPU utilization (multiple of 32 for warp alignment)
+            buffer_capacity: 100_000,
             exploration: ExplorationConfig::EpsilonGreedy {
                 epsilon_start: 1.0,
                 epsilon_end: 0.01,
@@ -102,9 +118,13 @@ impl<B: AutodiffBackend> MetisPolicy<B> {
             model,
             target_model,
             explorer,
-            config,
-            device,
+            config: config.clone(),
+            device: device.clone(),
             step_count: 0,
+            gpu_buffer: HybridRingBuffer::new(config.buffer_capacity, config.state_dim),
+            warmup_batch_size: 256.min(config.batch_size),
+            full_batch_size: config.batch_size,
+            warmup_complete: false,
         }
     }
 
@@ -252,16 +272,36 @@ impl<B: AutodiffBackend> CachePolicy for MetisPolicy<B> {
         0.0
     }
 
-    fn save(&self, _path: &Path) -> Result<(), Box<dyn Error>> {
-        // Save model using Burn's recorder
-        // TODO: Implement using ModelRecorder
-        Err("Save not yet implemented for MetisPolicy".into())
+    fn save(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+        // Use checkpoint module's save function
+        // path is the full path without extension, e.g., "checkpoints/metis_episode_100"
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("metis");
+
+        crate::training::checkpoint::save_checkpoint(
+            &self.model,
+            parent,
+            name,
+            0,
+            &self.checkpoint_metadata(),
+        )?;
+        Ok(())
     }
 
-    fn load(&mut self, _path: &Path) -> Result<(), Box<dyn Error>> {
-        // Load model using Burn's recorder
-        // TODO: Implement using ModelRecorder
-        Err("Load not yet implemented for MetisPolicy".into())
+    fn load(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
+        // Use checkpoint module's load function
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("metis");
+
+        let (loaded_model, _metadata) = crate::training::checkpoint::load_checkpoint::<B, _>(
+            parent,
+            name,
+            0,
+            &self.device,
+            || self.model.clone(),
+        )?;
+        self.model = loaded_model;
+        Ok(())
     }
 
     fn policy_type(&self) -> PolicyType {
@@ -270,6 +310,121 @@ impl<B: AutodiffBackend> CachePolicy for MetisPolicy<B> {
 
     fn action_dim(&self) -> usize {
         self.config.action_dim
+    }
+}
+
+// ============================================================================
+// Checkpointable Implementation for MetisPolicy
+// ============================================================================
+
+impl<B: AutodiffBackend> Checkpointable<B> for MetisPolicy<B> {
+    fn checkpoint_name(&self) -> &str {
+        "metis_policy"
+    }
+
+    fn checkpoint_metadata(&self) -> CheckpointMetadata {
+        CheckpointMetadata::new_with_dims(
+            "metis".to_string(),
+            self.step_count,
+            self.config.state_dim,
+            self.config.action_dim,
+            self.config.feature_dim,
+        )
+        .with_training_state(self.step_count, 0, self.epsilon(), 0.0)
+    }
+
+    fn model(&self) -> &impl burn::module::Module<B> {
+        &self.model
+    }
+}
+
+// ============================================================================
+// BatchedActionSelector Implementation for MetisPolicy
+// ============================================================================
+
+impl<B: AutodiffBackend> BatchedActionSelector<B> for MetisPolicy<B> {
+    fn select_actions_batched(
+        &self,
+        observations: &[Vec<f64>],
+        device: &B::Device,
+        action_dim: usize,
+        epsilon: f32,
+    ) -> Vec<usize> {
+        let batch_size = observations.len();
+        if batch_size == 0 {
+            return Vec::new();
+        }
+
+        // Convert observations to batched tensor [batch_size, state_dim]
+        let states_flat: Vec<f32> = observations.iter().flatten().map(|&x| x as f32).collect();
+        let states_tensor: Tensor<B, 2> = Tensor::from_data(
+            burn::tensor::TensorData::new(states_flat, [batch_size, self.config.state_dim])
+                .convert::<f32>(),
+            device,
+        );
+
+        // Forward pass: get importance and Q-values
+        let (_features, importance, q_values) = self.forward(states_tensor);
+
+        // Get importance scores as Vec<f32>
+        let importance_vec: Vec<f32> = importance
+            .into_data()
+            .convert::<f32>()
+            .to_vec::<f32>()
+            .expect("Failed to convert importance");
+
+        // Get Q-values as 2D Vec for exploration
+        let q_values_data: Vec<f32> = q_values
+            .clone()
+            .into_data()
+            .convert::<f32>()
+            .to_vec::<f32>()
+            .expect("Failed to convert Q-values");
+
+        // Generate random values for epsilon-greedy on GPU
+        let random_vals =
+            Tensor::<B, 1>::random([batch_size], Distribution::Uniform(0.0, 1.0), device);
+        let random_slice: Vec<f64> = random_vals
+            .into_data()
+            .convert::<f64>()
+            .to_vec::<f64>()
+            .expect("Failed to convert random values");
+
+        let mut actions = Vec::with_capacity(batch_size);
+
+        for i in 0..batch_size {
+            // Map importance [0, 1] to tier selection
+            let importance_scaled = (importance_vec[i] * 5.0).min(4.0);
+            let tier_idx = importance_scaled as usize;
+
+            // Get Q-values for this tier's actions (2 actions per tier: read/write)
+            let tier_start = tier_idx * 2;
+            let tier_q_read = q_values_data[i * action_dim + tier_start];
+            let tier_q_write = q_values_data[i * action_dim + tier_start + 1];
+
+            // Apply epsilon-greedy within tier
+            let action_in_tier = if random_slice[i] < epsilon as f64 {
+                // Explore: random action within tier (0 or 1)
+                if random_slice[i] < 0.5 {
+                    0
+                } else {
+                    1
+                }
+            } else {
+                // Exploit: choose best action within tier
+                if tier_q_read > tier_q_write {
+                    0
+                } else {
+                    1
+                }
+            };
+
+            // Encode action: tier * 2 + operation
+            let action = tier_idx * 2 + action_in_tier;
+            actions.push(action);
+        }
+
+        actions
     }
 }
 
@@ -310,6 +465,88 @@ impl<B: AutodiffBackend> ReplayPolicy for MetisPolicy<B> {
 
     fn update_target(&mut self) {
         self.update_target_network();
+    }
+}
+
+// ============================================================================
+// GpuTrainable Implementation for MetisPolicy
+// ============================================================================
+
+impl<B: AutodiffBackend> GpuTrainable<B> for MetisPolicy<B> {
+    fn gpu_buffer_mut(&mut self) -> &mut HybridRingBuffer<B> {
+        &mut self.gpu_buffer
+    }
+
+    fn gpu_buffer(&self) -> &HybridRingBuffer<B> {
+        &self.gpu_buffer
+    }
+
+    fn warmup_batch_size(&self) -> usize {
+        self.warmup_batch_size
+    }
+
+    fn full_batch_size(&self) -> usize {
+        self.full_batch_size
+    }
+
+    fn is_warmup_complete(&self) -> bool {
+        self.warmup_complete
+    }
+
+    fn set_warmup_complete(&mut self, complete: bool) {
+        self.warmup_complete = complete;
+    }
+
+    fn target_update_freq(&self) -> usize {
+        self.config.target_update_freq
+    }
+
+    fn step_count(&self) -> usize {
+        self.step_count
+    }
+
+    fn increment_step_count(&mut self) {
+        self.step_count += 1;
+    }
+
+    fn epsilon(&self) -> f32 {
+        self.explorer.get_param()
+    }
+
+    fn update_epsilon(&mut self) {
+        self.explorer.decay();
+    }
+
+    fn train_step_gpu(&mut self, batch: &TensorTransitionBatch<B>) -> f32 {
+        let batch_size = batch.states.dims()[0];
+        if batch_size == 0 {
+            tracing::warn!("Metis train_step_gpu called with empty batch");
+            return 0.0;
+        }
+
+        // Tensors are already on GPU - no conversion needed!
+        let actions: Tensor<B, 1, Int> = batch.actions.clone().squeeze();
+        let rewards: Tensor<B, 1> = batch.rewards.clone().squeeze();
+        let states = batch.states.clone();
+        let next_states = batch.next_states.clone();
+        let dones: Tensor<B, 1> = batch.dones.clone().squeeze();
+
+        // Train DQN step
+        let loss = self.train_dqn_step(
+            &states,
+            &actions.unsqueeze::<3>().reshape([batch_size, 1]),
+            &rewards.unsqueeze::<3>().reshape([batch_size, 1]),
+            &next_states,
+            &dones.unsqueeze::<3>().reshape([batch_size, 1]),
+        );
+
+        loss
+    }
+
+    fn maybe_update_target(&mut self, step_count: usize) {
+        if step_count % self.config.target_update_freq == 0 {
+            self.update_target_network();
+        }
     }
 }
 

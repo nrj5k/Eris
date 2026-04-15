@@ -30,6 +30,9 @@ pub enum EnvError {
     #[error("CSV parsing error: {0}")]
     CsvError(String),
 
+    #[error("DFTracer error: {0}")]
+    DfTracerError(String),
+
     #[error("trace exhausted")]
     TraceExhausted,
 
