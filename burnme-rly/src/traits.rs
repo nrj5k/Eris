@@ -151,6 +151,53 @@ pub trait GpuTrainable<B: AutodiffBackend> {
         device: &B::Device,
     ) -> Option<f32>;
 
+    /// Perform a GPU-native training step on a pre-built batch.
+    ///
+    /// This method takes a pre-sampled batch and performs the training step.
+    /// It does NOT handle sampling, warmup checks, or training frequency -
+    /// those should be handled by the caller.
+    ///
+    /// # Arguments
+    /// * `batch` - Pre-sampled batch from buffer
+    ///
+    /// # Returns
+    /// Loss value from training step
+    fn train_step_gpu(&mut self, batch: &crate::buffer::TensorTransitionBatch<B>) -> f32;
+
+    /// Perform a training step with an optional pre-built batch.
+    ///
+    /// When `prebuilt_batch` is `Some(batch)`, uses that batch directly.
+    /// When `None`, falls back to internal sampling.
+    ///
+    /// This enables double-buffering: while the GPU trains on batch N, the CPU can
+    /// prepare batch N+1 via `PrefetchBuffer`, then pass it here.
+    ///
+    /// # Arguments
+    /// * `steps_since_last_train` - Number of steps since last training
+    /// * `device` - GPU device for tensor operations
+    /// * `prebuilt_batch` - Optional pre-built batch from prefetch buffer
+    ///
+    /// # Returns
+    /// * `Some(loss)` if training occurred
+    /// * `None` if training was skipped (e.g., during warmup, insufficient samples)
+    fn train_step_gpu_native_with_prefetch(
+        &mut self,
+        steps_since_last_train: usize,
+        device: &B::Device,
+        prebuilt_batch: Option<crate::buffer::TensorTransitionBatch<B>>,
+    ) -> Option<f32> {
+        match prebuilt_batch {
+            Some(batch) => {
+                let loss = self.train_step_gpu(&batch);
+                self.increment_step_count();
+                self.maybe_update_target();
+                self.update_epsilon();
+                Some(loss)
+            }
+            None => self.train_step_gpu_native(steps_since_last_train, device),
+        }
+    }
+
     /// Get the device for tensor operations.
     fn device(&self) -> &B::Device;
 
@@ -419,6 +466,10 @@ mod tests {
 
         fn train_step_gpu_native(&mut self, _: usize, _device: &B::Device) -> Option<f32> {
             None
+        }
+
+        fn train_step_gpu(&mut self, _batch: &crate::buffer::TensorTransitionBatch<B>) -> f32 {
+            0.0
         }
 
         fn warmup_batch_size(&self) -> usize {

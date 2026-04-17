@@ -41,6 +41,7 @@ pub mod diagnostics;
 pub mod env;
 pub mod loss;
 pub mod models;
+pub mod prefetch;
 pub mod space;
 pub mod trainers;
 pub mod traits;
@@ -63,7 +64,8 @@ pub use env::{Info, StepResult};
 pub use loss::{
     compute_double_dqn_loss, compute_double_dqn_loss_rank2, compute_td_loss, compute_td_target,
 };
-pub use models::CombinedModel;
+pub use models::{ComposableModel, ComposeConfig, ParallelCompose, SequentialCompose};
+pub use prefetch::PrefetchBuffer;
 pub use space::DiscreteSpace;
 pub use trainers::{DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig};
 pub use traits::{BatchedActionSelector, GpuTrainable, GpuTrainableExt, VecEnvironment};

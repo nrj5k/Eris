@@ -200,6 +200,23 @@ impl GpuTrainingCoordinator {
 
         log::info!("Starting training: {} episodes", self.config.episodes);
 
+        // Pre-fill buffer with random transitions for fast warmup
+        // (standard DQN practice — avoids slow cold-start where GPU is idle)
+        let buffer_len = agent.buffer().len();
+        if buffer_len < self.config.warmup_batch_size {
+            let needed = self.config.warmup_batch_size - buffer_len;
+            let action_dim = env.action_space().n;
+            let state_dim = env.observation_dim();
+            agent
+                .buffer_mut()
+                .fill_random(needed, action_dim, state_dim);
+            log::info!(
+                "[STAGE:WARMUP] Pre-filled buffer with {} random transitions (buffer now has {})",
+                needed,
+                agent.buffer().len()
+            );
+        }
+
         // Episode loop
         while episode_count < self.config.episodes && total_steps < self.config.max_steps {
             let action_dim = env.action_space().n();
@@ -580,6 +597,11 @@ mod integration_tests {
             // Mock training: just return a fake loss
             self.step_count += 1;
             Some(0.5)
+        }
+
+        fn train_step_gpu(&mut self, _batch: &crate::buffer::TensorTransitionBatch<TestBackend>) -> f32 {
+            self.step_count += 1;
+            0.5
         }
 
         fn warmup_batch_size(&self) -> usize {

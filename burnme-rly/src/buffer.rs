@@ -536,6 +536,43 @@ impl CpuRingBuffer {
         self.head = 0;
         self.size = 0;
     }
+
+    /// Fill the buffer with random transitions for warmup initialization.
+    ///
+    /// This allows the training loop to start with a pre-filled buffer,
+    /// avoiding the slow cold-start phase where the GPU sits idle waiting
+    /// for enough samples.
+    ///
+    /// # Arguments
+    /// * `num_transitions` - Number of random transitions to generate
+    /// * `action_dim` - Number of possible actions (actions sampled from [0, action_dim))
+    /// * `state_dim` - Dimension of state/observation vectors
+    ///
+    /// # Note
+    /// Random transitions have zero reward and are not terminal (done=false).
+    /// States and next_states are filled with small random values.
+    /// This is standard DQN practice (Mnih et al., 2015).
+    pub fn fill_random(&mut self, num_transitions: usize, action_dim: usize, state_dim: usize) {
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        let count = num_transitions.min(self.capacity - self.size);
+        for _ in 0..count {
+            let state: Vec<f32> = (0..state_dim)
+                .map(|_| rng.random_range(-1.0..1.0))
+                .collect();
+            let action = rng.random_range(0..action_dim);
+            let reward = 0.0; // Zero reward for random warmup
+            let next_state: Vec<f32> = (0..state_dim)
+                .map(|_| rng.random_range(-1.0..1.0))
+                .collect();
+            let done = false;
+            self.push(Transition::new(state, action, reward, next_state, done));
+        }
+        log::info!(
+            "[STAGE:WARMUP] Pre-filled buffer with {} random transitions (action_dim={}, state_dim={})",
+            count, action_dim, state_dim
+        );
+    }
 }
 
 impl Default for CpuRingBuffer {
@@ -761,6 +798,43 @@ impl<B: Backend> HybridRingBuffer<B> {
         self.rewards.clear();
         self.next_states.clear();
         self.dones.clear();
+    }
+
+    /// Fill the buffer with random transitions for warmup initialization.
+    ///
+    /// This allows the training loop to start with a pre-filled buffer,
+    /// avoiding the slow cold-start phase where the GPU sits idle waiting
+    /// for enough samples.
+    ///
+    /// # Arguments
+    /// * `num_transitions` - Number of random transitions to generate
+    /// * `action_dim` - Number of possible actions (actions sampled from [0, action_dim))
+    /// * `state_dim` - Dimension of state/observation vectors
+    ///
+    /// # Note
+    /// Random transitions have zero reward and are not terminal (done=false).
+    /// States and next_states are filled with small random values.
+    /// This is standard DQN practice (Mnih et al., 2015).
+    pub fn fill_random(&mut self, num_transitions: usize, action_dim: usize, state_dim: usize) {
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        let count = num_transitions.min(self.capacity - self.size);
+        for _ in 0..count {
+            let state: Vec<f32> = (0..state_dim)
+                .map(|_| rng.random_range(-1.0..1.0))
+                .collect();
+            let action = rng.random_range(0..action_dim);
+            let reward = 0.0; // Zero reward for random warmup
+            let next_state: Vec<f32> = (0..state_dim)
+                .map(|_| rng.random_range(-1.0..1.0))
+                .collect();
+            let done = false;
+            self.push(state, action, reward, next_state, done);
+        }
+        log::info!(
+            "[STAGE:WARMUP] Pre-filled buffer with {} random transitions (action_dim={}, state_dim={})",
+            count, action_dim, state_dim
+        );
     }
 }
 
@@ -2924,5 +2998,21 @@ mod tests {
         buffer.clear();
         assert_eq!(buffer.len(), 0);
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_hybrid_buffer_fill_random() {
+        let mut buffer = HybridRingBuffer::<TestBackend>::new(100, 4);
+        buffer.fill_random(50, 10, 4);
+        assert_eq!(buffer.len(), 50);
+        assert!(buffer.can_sample(32));
+    }
+
+    #[test]
+    fn test_hybrid_buffer_fill_random_caps_at_capacity() {
+        let mut buffer = HybridRingBuffer::<TestBackend>::new(10, 4);
+        buffer.fill_random(50, 10, 4);
+        assert_eq!(buffer.len(), 10); // Capped at capacity
+        assert!(buffer.is_full());
     }
 }
