@@ -26,8 +26,10 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug, ValueEnum)]
 enum ModelType {
-    /// Metis: Combined DQN + Bandit
+    /// Metis: Combined DQN + Bandit (legacy)
     Metis,
+    /// MetisV2: Joint Bandit + DQN with SequentialCompose (NEW)
+    MetisV2,
     /// Cacheus: Contextual Multi-Armed Bandit
     Cacheus,
     /// Catcher: DDPG Actor-Critic
@@ -361,6 +363,13 @@ fn train_model_generic(args: &Args, device: Device) -> Result<(), String> {
         return run_cacheus_training(args);
     }
 
+    // Check if using MetisV2 (NEW - uses burnme-rly SequentialCompose)
+    if matches!(args.model, ModelType::MetisV2) {
+        return dispatch_training!(device, |B, dev| {
+            run_metis_v2_training::<B>(args, dev, create_exploration_config(args))
+        });
+    }
+
     // Create exploration config for DQN and Bandit
     let exploration = create_exploration_config(args);
 
@@ -610,6 +619,130 @@ fn run_training_vecenv<B: burn::tensor::backend::AutodiffBackend>(
             );
         }
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// METISV2 TRAINING (NEW - JOINT BANDIT + DQN WITH SEQUENTIALCOMPOSE)
+// ============================================================================
+
+/// Train MetisV2 policy (NEW - uses burnme-rly SequentialCompose)
+fn run_metis_v2_training<B: burn::tensor::backend::AutodiffBackend>(
+    args: &Args,
+    device: B::Device,
+    _exploration: eris::policies::ExplorationConfig,
+) -> Result<(), String> {
+    use burnme_rly::buffer::CpuRingBuffer;
+    use burnme_rly::models::{
+        composable::SequentialCompose,
+        metis_v2::{MetisV2Config, MetisV2Policy},
+    };
+    use eris::config::{BanditConfig, DQNConfig};
+    use eris::env::VecEnv;
+    use eris::models::{BanditAdapter, ContextualBandit, DQNAdapter, QNetwork};
+
+    println!("=== Training MetisV2 Policy (burnme-rly) ===");
+    println!("Episodes: {}", args.episodes);
+    println!("Max steps: {}", args.max_steps);
+    println!("Batch size: {}", args.batch_size);
+    println!("Learning rate: {}", args.learning_rate);
+    println!("Parallel environments: {}", args.num_envs);
+
+    // Create vectorized environment
+    let trace_path = &args.trace_file;
+    let config_path = &args.config;
+
+    println!("Creating {} parallel environments...", args.num_envs);
+    let mut vec_env = VecEnv::new(
+        args.num_envs,
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+    )
+    .map_err(|e| format!("Failed to create VecEnv: {}", e))?;
+
+    let state_dim = vec_env.observation_dim();
+    let action_dim = vec_env.action_space().n;
+    println!("State dim: {}, Action dim: {}", state_dim, action_dim);
+
+    // Create bandit config
+    let bandit_config = BanditConfig::builder()
+        .input_dim(state_dim)
+        .hidden_layers(vec![64, 128])
+        .feature_dim(20)
+        .build()
+        .map_err(|e| format!("Bandit config failed: {}", e))?;
+
+    // Create DQN config
+    let dqn_config = DQNConfig::builder()
+        .input_dim(20) // feature_dim from bandit
+        .action_dim(action_dim)
+        .hidden_layers(vec![128, 128])
+        .dueling(true)
+        .build()
+        .map_err(|e| format!("DQN config failed: {}", e))?;
+
+    // Create eris models using config init methods
+    let bandit = bandit_config.init(&device);
+    let qnetwork = dqn_config.init(&device);
+
+    // Wrap in adapters
+    let bandit_adapter = BanditAdapter::new(bandit, 20); // feature_dim
+    let dqn_adapter = DQNAdapter::new(qnetwork, action_dim);
+
+    // Create SequentialCompose: Bandit -> DQN
+    let model = SequentialCompose::new(bandit_adapter, dqn_adapter);
+
+    // Create importance closure
+    let importance_fn: Box<dyn Fn(burn::tensor::Tensor<B, 2>) -> burn::tensor::Tensor<B, 2>> =
+        Box::new(|features| {
+            // Importance is features.mean_dim(1) normalized to [0,1]
+            // For simplicity: use tanh(mean) * 0.5 + 0.5
+            let shape = features.shape().dims[0];
+            let mean = features.mean_dim(1).reshape([shape, 1]);
+            mean.tanh() * 0.5 + 0.5
+        });
+
+    // Create MetisV2 config
+    let metis_config = MetisV2Config::default()
+        .with_bandit_loss_weight(0.5)
+        .with_max_gradient_norm(1.0);
+
+    // Create policy
+    let mut policy =
+        MetisV2Policy::<B, _, _>::new(model, metis_config, device.clone(), importance_fn)
+            .map_err(|e| format!("Failed to create MetisV2Policy: {}", e))?;
+
+    // Create buffer
+    let buffer = CpuRingBuffer::new(args.buffer_capacity);
+    policy.buffer = buffer;
+
+    println!("MetisV2 policy initialized!");
+
+    // Create coordinator using burnme_rly GpuTrainingCoordinator
+    // Note: VecEnv implements burnme_rly::VecEnvironment via re-export
+    let training_config = burnme_rly::coordinator::TrainingConfig::new(
+        args.episodes,
+        args.max_steps,
+        args.batch_size,
+    )
+    .with_warmup_batch_size(args.warmup_batch_size)
+    .with_checkpoint_interval(10)
+    .with_train_frequency(4);
+
+    let coordinator = burnme_rly::coordinator::GpuTrainingCoordinator::new(training_config);
+
+    // Run training
+    let metrics = coordinator
+        .run_training(&mut policy, &mut vec_env, &device, "checkpoints/metis_v2")
+        .map_err(|e| format!("Training failed: {}", e))?;
+
+    println!(
+        "Training complete! Episodes: {}, Avg reward: {:.2}",
+        metrics.total_episodes, metrics.avg_reward
+    );
 
     Ok(())
 }

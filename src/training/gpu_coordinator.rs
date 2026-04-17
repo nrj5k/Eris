@@ -82,9 +82,6 @@ pub use burnme_rly::coordinator::TrainingMetrics;
 /// Re-exported from burnme-rly for DRY.
 pub use burnme_rly::traits::BatchedActionSelector;
 
-/// Double-buffer prefetch for overlapping CPU→GPU transfer with GPU training.
-pub use crate::training::prefetch::PrefetchBuffer;
-
 /// Trait for vectorized environments running multiple instances in parallel.
 ///
 /// This trait abstracts over vectorized environment implementations,
@@ -439,9 +436,6 @@ impl GpuTrainingCoordinator {
             );
         }
 
-        // Initialize PrefetchBuffer for double-buffering
-        let mut prefetch = PrefetchBuffer::new();
-
         // Episode loop
         while episode_count < self.episodes {
             // Batched action selection - single forward pass for all envs
@@ -520,52 +514,32 @@ impl GpuTrainingCoordinator {
             );
 
             if should_train {
-                tracing::debug!(
-                    "Calling train_step_gpu_native_with_prefetch, steps_since_last_train: {}, buffer_len: {}, warmup_complete: {}, coordinator_warmup_batch_size: {}, coordinator_batch_size: {}",
-                    steps_since_last_train,
-                    agent.gpu_buffer().len(),
-                    agent.is_warmup_complete(),
-                    self.warmup_batch_size,
-                    self.batch_size
-                );
-
-                // Get any previously-prefetched batch for THIS training step
-                let prebuilt_batch = prefetch.take_current();
-
-                // Submit prefetch for the NEXT batch while we train THIS one
                 let effective_batch_size = if agent.is_warmup_complete() {
                     self.batch_size
                 } else {
                     self.warmup_batch_size.min(self.batch_size)
                 };
-                prefetch.submit_prefetch(agent.gpu_buffer(), effective_batch_size, device);
 
-                // Train using prebuilt batch if available, otherwise sample internally
-                let train_result = agent.train_step_gpu_native_with_prefetch(
-                    steps_since_last_train,
-                    device,
-                    self.warmup_batch_size,
-                    self.batch_size,
-                    prebuilt_batch,
-                );
-
-                // Swap — prefetch we just submitted becomes current for NEXT iteration
-                let _ = prefetch.swap();
-
-                match train_result {
-                    Some(loss) => {
+                // Sample directly from GPU buffer - no prefetch overhead
+                match agent
+                    .gpu_buffer_mut()
+                    .sample_batch(effective_batch_size, device)
+                {
+                    Some(batch) => {
+                        let train_result = agent.train_step_gpu(&batch);
                         tracing::debug!(
-                            "train_step_gpu_native_with_prefetch returned Some({:.4}), step_count: {}",
-                            loss,
+                            "train_step_gpu returned Some({:.4}), step_count: {}",
+                            train_result,
                             agent.step_count()
                         );
-                        total_loss += loss as f64;
+                        total_loss += train_result as f64;
                         train_steps += 1;
                     }
                     None => {
                         tracing::debug!(
-                            "train_step_gpu_native_with_prefetch returned None! buffer_len: {}, warmup_complete: {}",
+                            "sample_batch returned None! buffer_len: {}, batch_size: {}, warmup_complete: {}",
                             agent.gpu_buffer().len(),
+                            effective_batch_size,
                             agent.is_warmup_complete()
                         );
                     }

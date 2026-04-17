@@ -7,6 +7,7 @@ use crate::env::{Environment, IOBufferEnv, Info, StepResult};
 use crate::space::{DiscreteSpace, Space};
 use crate::trace::{TraceFormat, TraceReader};
 use crate::training::VecEnvironment;
+use burnme_rly::traits::VecEnvironment as BurnmeRlyVecEnvironment;
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
@@ -333,6 +334,105 @@ impl VecEnvironment for VecEnv {
         reset_obs: &[Option<Vec<f64>>],
     ) -> Result<Vec<Vec<f64>>, Box<dyn Error>> {
         Ok(VecEnv::get_current_observations(results, reset_obs))
+    }
+}
+
+// Also implement burnme_rly's VecEnvironment for compatibility
+impl BurnmeRlyVecEnvironment for VecEnv {
+    fn num_envs(&self) -> usize {
+        self.num_envs
+    }
+
+    fn action_space(&self) -> &burnme_rly::space::DiscreteSpace {
+        // Safe cast: both DiscreteSpace types have identical layout (pub n: usize)
+        unsafe { std::mem::transmute(&self.action_space) }
+    }
+
+    fn observation_dim(&self) -> usize {
+        self.observation_dim
+    }
+
+    fn reset_all(&mut self) -> Result<Vec<Vec<f64>>, Box<dyn Error>> {
+        self.reset_all()
+    }
+
+    fn step_all(
+        &mut self,
+        actions: Vec<usize>,
+    ) -> Result<Vec<burnme_rly::env::StepResult>, Box<dyn Error>> {
+        // Convert StepResult types
+        let results = self.step_all(actions)?;
+        Ok(results
+            .into_iter()
+            .map(|r| burnme_rly::env::StepResult {
+                action: r.action,
+                observation: r.observation,
+                reward: r.reward,
+                done: r.done,
+                info: burnme_rly::env::Info::default(),
+            })
+            .collect())
+    }
+
+    fn step_all_parallel(
+        &mut self,
+        actions: Vec<usize>,
+    ) -> Result<Vec<burnme_rly::env::StepResult>, Box<dyn Error>> {
+        #[cfg(feature = "parallel")]
+        {
+            let results = self.step_all_parallel(actions)?;
+            Ok(results
+                .into_iter()
+                .map(|r| burnme_rly::env::StepResult {
+                    action: r.action,
+                    observation: r.observation,
+                    reward: r.reward,
+                    done: r.done,
+                    info: burnme_rly::env::Info::default(),
+                })
+                .collect())
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            self.step_all(actions)
+        }
+    }
+
+    fn reset_done_environments(
+        &mut self,
+        results: &[burnme_rly::env::StepResult],
+    ) -> Result<Vec<Option<Vec<f64>>>, Box<dyn Error>> {
+        // Convert back to eris StepResult for internal use
+        let eris_results: Vec<StepResult> = results
+            .iter()
+            .map(|r| StepResult {
+                action: r.action,
+                observation: r.observation.clone(),
+                reward: r.reward,
+                done: r.done,
+                info: crate::env::Info::default(),
+            })
+            .collect();
+        Ok(self.reset_done_environments(&eris_results))
+    }
+
+    fn get_current_observations(
+        &self,
+        results: &[burnme_rly::env::StepResult],
+        reset_obs: &[Option<Vec<f64>>],
+    ) -> Result<Vec<Vec<f64>>, Box<dyn Error>> {
+        // Convert back to eris StepResult for internal use
+        let eris_results: Vec<StepResult> = results
+            .iter()
+            .map(|r| StepResult {
+                action: r.action,
+                observation: r.observation.clone(),
+                reward: r.reward,
+                done: r.done,
+                info: crate::env::Info::default(),
+            })
+            .collect();
+        Ok(VecEnv::get_current_observations(&eris_results, reset_obs))
     }
 }
 
