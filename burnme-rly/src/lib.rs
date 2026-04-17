@@ -64,7 +64,10 @@ pub use env::{Info, StepResult};
 pub use loss::{
     compute_double_dqn_loss, compute_double_dqn_loss_rank2, compute_td_loss, compute_td_target,
 };
-pub use models::{ComposableModel, ComposeConfig, ParallelCompose, SequentialCompose};
+pub use models::{
+    ComposableModel, ComposeConfig, MetisV2Config, MetisV2Policy, ParallelCompose,
+    SequentialCompose,
+};
 pub use prefetch::PrefetchBuffer;
 pub use space::DiscreteSpace;
 pub use trainers::{DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig};

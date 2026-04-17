@@ -187,6 +187,25 @@ where
     }
 }
 
+impl<B, A, M> burn::module::AutodiffModule<B> for SequentialCompose<B, A, M>
+where
+    B: burn::tensor::backend::AutodiffBackend,
+    A: ComposableModel<B> + burn::module::AutodiffModule<B> + Send + Clone + std::fmt::Debug,
+    M: ComposableModel<B> + burn::module::AutodiffModule<B> + Send + Clone + std::fmt::Debug,
+    A::InnerModule: ComposableModel<B::InnerBackend>,
+    M::InnerModule: ComposableModel<B::InnerBackend>,
+{
+    type InnerModule = SequentialCompose<B::InnerBackend, A::InnerModule, M::InnerModule>;
+
+    fn valid(&self) -> Self::InnerModule {
+        SequentialCompose {
+            model_a: self.model_a.valid(),
+            model_b: self.model_b.valid(),
+            _backend: std::marker::PhantomData,
+        }
+    }
+}
+
 impl<B, A, M> SequentialCompose<B, A, M>
 where
     B: Backend,

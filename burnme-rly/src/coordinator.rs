@@ -599,7 +599,10 @@ mod integration_tests {
             Some(0.5)
         }
 
-        fn train_step_gpu(&mut self, _batch: &crate::buffer::TensorTransitionBatch<TestBackend>) -> f32 {
+        fn train_step_gpu(
+            &mut self,
+            _batch: &crate::buffer::TensorTransitionBatch<TestBackend>,
+        ) -> f32 {
             self.step_count += 1;
             0.5
         }
