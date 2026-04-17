@@ -1,6 +1,20 @@
+//! Combined model for Metis (baseline version).
+//!
+//! This is the **metis-baseline** model — a hardcoded chain of
+//! ContextualBandit → QNetwork with end-to-end gradient flow.
+//!
+//! For the newer generic model using SequentialCompose (stop-gradient,
+//! independent training), see `MetisModel` below.
+
 use burn::{config::Config, module::Module, prelude::*};
 
-use crate::models::{ContextualBandit, ContextualBanditConfig, QNetwork, QNetworkConfig};
+use burn::tensor::{backend::Backend, Tensor};
+use burnme_rly::models::ComposableModel;
+
+use crate::models::{
+    compose_adapter::{BanditAdapter, DQNAdapter},
+    ContextualBandit, ContextualBanditConfig, QNetwork, QNetworkConfig,
+};
 use crate::tier::TierSelector;
 use crate::training::checkpoint::{CheckpointMetadata, Checkpointable};
 
@@ -239,6 +253,45 @@ pub fn decode_action(action_idx: usize) -> (usize, usize) {
 pub fn encode_action(tier_idx: usize, op_type: usize) -> usize {
     tier_idx * 2 + op_type
 }
+
+/// New Metis model using generic SequentialCompose.
+///
+/// This chains BanditAdapter → DQNAdapter with stop-gradient between them.
+/// The bandit learns features independently, the DQN decides actions,
+/// and they cooperate through shared reward.
+///
+/// For the baseline comparison, use `CombinedModel` (now "metis-baseline").
+pub type MetisModel<B> = burnme_rly::models::SequentialCompose<B, BanditAdapter<B>, DQNAdapter<B>>;
+
+/// Helper methods specific to MetisModel.
+pub trait MetisModelExt<B: Backend> {
+    /// Get features + importance from the bandit (for bandit loss).
+    fn forward_bandit(&self, input: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>);
+
+    /// Get Q-values from the DQN (for DQN loss, without detach).
+    fn forward_dqn(&self, features: Tensor<B, 2>) -> Tensor<B, 2>;
+
+    /// Get the composed forward pass (with detach, for action selection).
+    fn forward_composed(&self, input: Tensor<B, 2>) -> Tensor<B, 2>;
+}
+
+impl<B: Backend> MetisModelExt<B> for MetisModel<B> {
+    fn forward_bandit(&self, input: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
+        self.model_a.bandit.forward(input)
+    }
+
+    fn forward_dqn(&self, features: Tensor<B, 2>) -> Tensor<B, 2> {
+        self.forward_b(features)
+    }
+
+    fn forward_composed(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
+        self.forward(input)
+    }
+}
+
+// Note: MetisModel<B> is a type alias for SequentialCompose from burnme-rly.
+// It already implements Module<B> via the manual impl in burnme-rly.
+// Checkpointing is done via the generic save_checkpoint function with the model name.
 
 #[cfg(test)]
 mod tests {

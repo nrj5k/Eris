@@ -9,11 +9,14 @@ use super::tensor_utils::{batch_to_tensors, state_to_tensor};
 use crate::config::CombinedBanditDQNConfig;
 use crate::models::CombinedModel;
 use crate::training::checkpoint::{CheckpointMetadata, CheckpointMetadataExt, Checkpointable};
-use crate::training::gpu_coordinator::BatchedActionSelector;
-use crate::training::tensor_buffer::TensorTransitionBatch;
+use crate::training::BatchedActionSelector;
 use crate::training::{GpuTrainable, HybridRingBuffer};
+use burn::grad_clipping::GradientClippingConfig;
+use burn::optim::adaptor::OptimizerAdaptor;
+use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Distribution, Int, Tensor};
+use burnme_rly::buffer::TensorTransitionBatch;
 use std::error::Error;
 use std::path::Path;
 
@@ -23,6 +26,8 @@ pub struct MetisPolicy<B: AutodiffBackend> {
     pub model: CombinedModel<B>,
     /// Target network (frozen copy)
     pub target_model: CombinedModel<B>,
+    /// Optimizer for model parameter updates using Adam with gradient clipping
+    optimizer: OptimizerAdaptor<Adam, CombinedModel<B>, B>,
     /// Exploration strategy
     explorer: Box<dyn ExplorationStrategy<B>>,
     /// Configuration
@@ -68,6 +73,11 @@ pub struct MetisConfig {
     pub buffer_capacity: usize,
     /// Exploration strategy configuration
     pub exploration: ExplorationConfig,
+    /// Weight for bandit loss in joint training (default: 0.5)
+    /// The joint loss = dqn_loss + bandit_loss_weight * bandit_loss
+    pub bandit_loss_weight: f32,
+    /// Maximum gradient norm for gradient clipping (default: 1.0)
+    pub max_gradient_norm: f32,
 }
 
 impl Default for MetisConfig {
@@ -89,6 +99,8 @@ impl Default for MetisConfig {
                 epsilon_end: 0.01,
                 epsilon_decay: 0.995,
             },
+            bandit_loss_weight: 0.5,
+            max_gradient_norm: 1.0,
         }
     }
 }
@@ -114,9 +126,18 @@ impl<B: AutodiffBackend> MetisPolicy<B> {
         // Build exploration strategy from config
         let explorer = config.exploration.build(config.action_dim);
 
+        // Initialize optimizer with Adam and gradient clipping
+        let optimizer = AdamConfig::new()
+            .with_beta_1(0.9)
+            .with_beta_2(0.999)
+            .with_epsilon(1e-8)
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.max_gradient_norm)))
+            .init();
+
         Self {
             model,
             target_model,
+            optimizer,
             explorer,
             config: config.clone(),
             device: device.clone(),
@@ -211,14 +232,18 @@ impl<B: AutodiffBackend> MetisPolicy<B> {
         Action::Discrete(action)
     }
 
-    /// DQN training step with Double DQN
+    /// Joint training step with DQN loss + Bandit loss
     ///
     /// # Arguments
-    /// * `batch` - Batch of transitions from replay buffer
+    /// * `states` - Current states [batch_size, state_dim]
+    /// * `actions` - Taken actions [batch_size, 1]
+    /// * `rewards` - Rewards [batch_size, 1]
+    /// * `next_states` - Next states [batch_size, state_dim]
+    /// * `dones` - Terminal flags [batch_size, 1]
     ///
     /// # Returns
-    /// * Loss value
-    fn train_dqn_step(
+    /// * Joint loss value (DQN + bandit)
+    fn train_joint_step(
         &mut self,
         states: &Tensor<B, 2>,
         actions: &Tensor<B, 2, Int>,
@@ -226,33 +251,69 @@ impl<B: AutodiffBackend> MetisPolicy<B> {
         next_states: &Tensor<B, 2>,
         dones: &Tensor<B, 2>,
     ) -> f32 {
-        // Current Q values
-        let (_, _, q_values) = self.model.forward(states.clone());
+        // Forward pass through the model
+        let (_features, importance, q_values) = self.model.forward(states.clone());
 
-        // Gather Q values for taken actions
+        // Gather Q-values for taken actions
         let current_q = q_values.gather(1, actions.clone());
 
-        // Double DQN: Use policy network to select actions
+        // Double DQN target computation
+        // 1. Get next Q-values from target model
+        let next_q_target = self.target_model.forward(next_states.clone()).2;
+
+        // 2. Get best actions from policy model (not target)
         let (_, _, next_q_policy) = self.model.forward(next_states.clone());
         let best_actions = next_q_policy.argmax(1);
-
-        // Use target network to evaluate actions
-        let (_, _, next_q_target) = self.target_model.forward(next_states.clone());
         let max_next_q = next_q_target.gather(1, best_actions);
 
-        // Compute target: r + gamma * max_a' Q_target(s', a') * (1 - done)
-        let gamma_val: f32 = self.config.gamma.into();
+        // 3. Compute TD target: r + γ * max_next_q * (1 - done)
         let target_q = rewards.clone()
-            + Tensor::full([1], gamma_val, &self.device)
+            + Tensor::full(rewards.dims(), self.config.gamma, &self.device)
                 * max_next_q
                 * (Tensor::ones_like(dones) - dones.clone());
 
-        // MSE loss - need to broadcast correctly
-        let diff = current_q - target_q.detach();
-        let squared = diff.powf(Tensor::full([1], 2.0_f32, &self.device));
-        let loss = squared.mean();
+        // DQN loss
+        let dqn_loss = (current_q - target_q.detach()).powf_scalar(2.0).mean();
 
-        loss.into_data().convert::<f32>().as_slice().unwrap()[0]
+        // Bandit loss: MSE between importance scores and normalized rewards
+        // Normalize rewards to [0, 1] using min-max scaling
+        let min_reward = rewards.clone().min().reshape([1, 1]);
+        let max_reward = rewards.clone().max().reshape([1, 1]);
+        let reward_range = max_reward.clone() - min_reward.clone();
+        let epsilon = Tensor::<B, 2>::full([1, 1], 1e-8, &self.device);
+        let normalized_rewards = (rewards.clone() - min_reward) / (reward_range + epsilon);
+
+        // Bandit loss: MSE(importance, normalized_rewards)
+        let bandit_loss = (importance - normalized_rewards).powf_scalar(2.0).mean();
+
+        // Joint loss = DQN loss + bandit_loss_weight * bandit loss
+        let joint_loss = dqn_loss + self.config.bandit_loss_weight * bandit_loss;
+
+        // Backward pass — gradients flow to BOTH bandit and DQN heads
+        let grads = joint_loss.backward();
+        let grads_params = GradientsParams::from_grads(grads, &self.model);
+
+        // Optimizer step
+        self.model = self.optimizer.step(
+            self.config.learning_rate as f64,
+            self.model.clone(),
+            grads_params,
+        );
+
+        // Increment step count after optimizer step
+        self.step_count += 1;
+
+        // Decay exploration parameters
+        self.explorer.decay();
+
+        // Update target network periodically
+        if self.step_count % self.config.target_update_freq == 0 {
+            self.target_model = self.model.clone();
+        }
+
+        // Convert to scalar for logging
+        let loss_scalar: f32 = joint_loss.into_data().convert::<f32>().as_slice().unwrap()[0];
+        loss_scalar
     }
 
     /// Update target network
@@ -438,23 +499,14 @@ impl<B: AutodiffBackend> ReplayPolicy for MetisPolicy<B> {
         let (states_tensor, actions_tensor, rewards_tensor, next_states_tensor, dones_tensor) =
             batch_to_tensors(batch, self.config.state_dim, &self.device);
 
-        // Train DQN
-        let loss = self.train_dqn_step(
+        // Train with joint loss (DQN + bandit)
+        let loss = self.train_joint_step(
             &states_tensor,
             &actions_tensor,
             &rewards_tensor,
             &next_states_tensor,
             &dones_tensor,
         );
-
-        // Decay exploration parameters
-        self.explorer.decay();
-
-        // Update target network periodically
-        self.step_count += 1;
-        if self.step_count % self.config.target_update_freq == 0 {
-            self.update_target_network();
-        }
 
         loss
     }
@@ -525,20 +577,15 @@ impl<B: AutodiffBackend> GpuTrainable<B> for MetisPolicy<B> {
         }
 
         // Tensors are already on GPU - no conversion needed!
-        let actions: Tensor<B, 1, Int> = batch.actions.clone().squeeze();
-        let rewards: Tensor<B, 1> = batch.rewards.clone().squeeze();
+        // Batch already has rank-2 format [batch_size, 1], reshape for type signature
         let states = batch.states.clone();
         let next_states = batch.next_states.clone();
-        let dones: Tensor<B, 1> = batch.dones.clone().squeeze();
+        let actions = batch.actions.clone().reshape([batch_size, 1]);
+        let rewards = batch.rewards.clone().reshape([batch_size, 1]);
+        let dones = batch.dones.clone().reshape([batch_size, 1]);
 
-        // Train DQN step
-        let loss = self.train_dqn_step(
-            &states,
-            &actions.unsqueeze::<3>().reshape([batch_size, 1]),
-            &rewards.unsqueeze::<3>().reshape([batch_size, 1]),
-            &next_states,
-            &dones.unsqueeze::<3>().reshape([batch_size, 1]),
-        );
+        // Train joint step (DQN + bandit)
+        let loss = self.train_joint_step(&states, &actions, &rewards, &next_states, &dones);
 
         loss
     }

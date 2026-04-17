@@ -11,6 +11,7 @@ pub mod gpu_coordinator;
 pub mod gpu_trainable;
 pub mod hybrid_buffer;
 pub mod mock_env;
+pub mod prefetch;
 pub mod replay_buffer;
 pub mod ring_buffer;
 pub mod tensor_buffer;
@@ -34,8 +35,13 @@ pub use gpu_coordinator::{
 pub use gpu_trainable::{should_train, train_step_with_warmup, GpuTrainable};
 pub use hybrid_buffer::HybridRingBuffer;
 pub use mock_env::{create_dummy_transition, fill_buffer, MockEnv};
+
+// Deprecated buffer types - allow deprecated to avoid warnings for consumers
+#[allow(deprecated)]
 pub use replay_buffer::{ReplayBuffer, Transition, TransitionBatch};
+#[allow(deprecated)]
 pub use ring_buffer::RingBuffer;
-pub use tensor_buffer::{TensorRingBuffer, TensorTransitionBatch as GpuTransitionBatch};
+
+pub use tensor_buffer::TensorRingBuffer;
 pub use trainer::{CombinedAgent, TrainingConfig};
 pub use transition_batcher::{TensorTransitionBatch, TransitionBatcher};

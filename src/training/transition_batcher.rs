@@ -3,23 +3,9 @@ use burn::tensor::{backend::Backend, Int, Tensor, TensorData};
 
 use crate::training::Transition;
 
-/// Batch of transitions with tensors on device (GPU-compatible)
-///
-/// This is a tensor-based batch for use with Burn's Batcher trait.
-/// Different from the CPU-based TransitionBatch in replay_buffer.rs.
-#[derive(Clone, Debug)]
-pub struct TensorTransitionBatch<B: Backend> {
-    /// States: [batch_size, state_dim]
-    pub states: Tensor<B, 2>,
-    /// Actions: [batch_size, 1] (int tensor)
-    pub actions: Tensor<B, 2, Int>,
-    /// Rewards: [batch_size, 1]
-    pub rewards: Tensor<B, 2>,
-    /// Next states: [batch_size, state_dim]
-    pub next_states: Tensor<B, 2>,
-    /// Done flags: [batch_size, 1] (f32 tensor)
-    pub dones: Tensor<B, 2>,
-}
+/// Batch of transitions as GPU tensors.
+/// Re-exported from burnme-rly (rank-2 format: actions [batch, 1]).
+pub use burnme_rly::buffer::TensorTransitionBatch;
 
 /// Batcher for converting Vec<Transition> to TransitionBatch
 ///
@@ -39,7 +25,7 @@ impl<B: Backend> Batcher<B, Transition, TensorTransitionBatch<B>> for Transition
                 device,
             );
             let actions_tensor = Tensor::<B, 2, Int>::from_data(
-                TensorData::new(Vec::<i64>::new(), [0, 1]).convert::<i64>(),
+                TensorData::new(Vec::<i32>::new(), [0, 1]).convert::<i32>(),
                 device,
             );
             let rewards_tensor = Tensor::from_data(
@@ -75,8 +61,8 @@ impl<B: Backend> Batcher<B, Transition, TensorTransitionBatch<B>> for Transition
             .flat_map(|t| t.next_state.iter().copied())
             .collect();
 
-        // Collect actions as i64 (Burn's Int element type)
-        let actions: Vec<i64> = items.iter().map(|t| t.action as i64).collect();
+        // Collect actions as i32 (lib's TensorTransitionBatch uses i32)
+        let actions: Vec<i32> = items.iter().map(|t| t.action as i32).collect();
 
         // Collect rewards
         let rewards: Vec<f32> = items.iter().map(|t| t.reward).collect();
@@ -92,9 +78,9 @@ impl<B: Backend> Batcher<B, Transition, TensorTransitionBatch<B>> for Transition
         let states_data = TensorData::new(states_flat, [batch_size, state_dim]);
         let states_tensor = Tensor::from_data(states_data.convert::<f32>(), device);
 
-        // Actions: [batch_size, 1] (int tensor)
+        // Actions: [batch_size, 1] (int tensor, i32 for lib compatibility)
         let actions_data = TensorData::new(actions, [batch_size, 1]);
-        let actions_tensor = Tensor::from_data(actions_data.convert::<i64>(), device);
+        let actions_tensor = Tensor::from_data(actions_data.convert::<i32>(), device);
 
         // Rewards: [batch_size, 1]
         let rewards_data = TensorData::new(rewards, [batch_size, 1]);

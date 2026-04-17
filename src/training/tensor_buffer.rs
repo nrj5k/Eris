@@ -644,6 +644,9 @@ impl<B: Backend> Clone for TensorRingBuffer<B> {
 }
 
 /// Batch of transitions with tensors on device
+///
+/// Note: This uses rank-1 tensors for actions/rewards/dones.
+/// For the burnme-rly version with rank-2 tensors, use `transition_batcher::TensorTransitionBatch`.
 #[derive(Debug, Clone)]
 pub struct TensorTransitionBatch<B: Backend> {
     /// States: [batch_size, state_dim]

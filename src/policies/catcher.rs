@@ -9,7 +9,6 @@
 use super::policy::*;
 use crate::training::checkpoint::{CheckpointMetadata, Checkpointable};
 use crate::training::gpu_trainable::GpuTrainable;
-use crate::training::tensor_buffer::TensorTransitionBatch;
 use crate::training::HybridRingBuffer;
 use burn::config::Config;
 use burn::module::Module;
@@ -17,7 +16,8 @@ use burn::nn::{Linear, LinearConfig, Relu, Tanh};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::backend::Backend;
-use burn::tensor::{Distribution, Tensor, TensorData};
+use burn::tensor::{Distribution, Int, Tensor, TensorData};
+use burnme_rly::buffer::TensorTransitionBatch;
 use std::error::Error;
 use std::path::Path;
 
@@ -610,19 +610,24 @@ impl<B: AutodiffBackend> GpuTrainable<B> for CatcherPolicy<B> {
 
         // Forward pass through actor and critic
         let features = batch.states.clone();
+        let batch_size = batch.states.dims()[0];
 
         // Convert actions from Int to Float for critic (actions are continuous in [-1, 1])
         // For Catcher, actions are stored as discrete tier indices (0-9)
         // We need to convert them back to continuous values in [-1, 1] for DDPG training
         // Map [0, 9] -> [-1, 1]: continuous = (index / 9.0) * 2.0 - 1.0
-        let batch_size = batch.states.dims()[0];
-        let actions_float: Vec<f32> = batch
-            .actions
-            .clone()
+        // Batch actions are now rank-2 [batch_size, 1] with i32 type
+        let actions_int: Tensor<B, 2, Int> = batch.actions.clone();
+        let actions_int_1d: Tensor<B, 1, Int> = actions_int.squeeze();
+        let actions_i64: Vec<i64> = actions_int_1d
             .into_data()
             .convert::<i64>()
             .as_slice::<i64>()
             .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        let actions_float: Vec<f32> = actions_i64
             .iter()
             .map(|&idx| ((idx as f32 / 9.0) * 2.0) - 1.0)
             .collect();
@@ -640,14 +645,16 @@ impl<B: AutodiffBackend> GpuTrainable<B> for CatcherPolicy<B> {
         let max_next_q: Tensor<B, 1> = next_q_values.squeeze();
 
         // TD target: y = r + (1 - done) * gamma * Q'(s', a')
-        let not_done = batch.dones.clone().neg().add_scalar(1.0f32);
+        // Batch dones is rank-2 [batch_size, 1], squeeze to rank-1
+        let dones_1d: Tensor<B, 1> = batch.dones.clone().squeeze();
+        let not_done = dones_1d.clone().neg().add_scalar(1.0f32);
         let gamma_tensor = Tensor::from_data(
             TensorData::new(vec![self.gamma], [1]).convert::<f32>(),
             &self.device,
         );
-        let target_q = batch
-            .rewards
-            .clone()
+        // Batch rewards is rank-2 [batch_size, 1], squeeze to rank-1
+        let rewards_1d: Tensor<B, 1> = batch.rewards.clone().squeeze();
+        let target_q = rewards_1d
             .add(max_next_q.mul(not_done).mul(gamma_tensor))
             .detach();
 
@@ -708,6 +715,62 @@ impl<B: AutodiffBackend> GpuTrainable<B> for CatcherPolicy<B> {
             self.target_actor = self.actor.clone();
             self.target_critic = self.critic.clone();
         }
+    }
+
+    fn train_step_gpu_native_with_prefetch(
+        &mut self,
+        steps_since_last_train: usize,
+        device: &B::Device,
+        warmup_batch_size: usize,
+        full_batch_size: usize,
+        prebuilt_batch: Option<TensorTransitionBatch<B>>,
+    ) -> Option<f32> {
+        // Check training frequency using lib's canonical should_train
+        let should_train = crate::training::should_train(
+            self.is_warmup_complete(),
+            steps_since_last_train,
+            4, // train_frequency
+        );
+
+        if !should_train {
+            return None;
+        }
+
+        // Get the batch: either use the prefetched one or sample internally
+        let effective_batch_size = if self.is_warmup_complete() {
+            full_batch_size
+        } else {
+            let effective = warmup_batch_size.min(full_batch_size);
+            let buffer_len: usize = self.gpu_buffer().len();
+            if buffer_len >= full_batch_size {
+                self.set_warmup_complete(true);
+            }
+            effective
+        };
+
+        let batch = match prebuilt_batch {
+            Some(batch) => batch,
+            None => {
+                match self
+                    .gpu_buffer_mut()
+                    .sample_batch(effective_batch_size, device)
+                {
+                    Some(batch) => batch,
+                    None => {
+                        log::trace!("[STAGE:DIAG] train_step_gpu_native_with_prefetch: Not enough samples (have {}, need {}), skipping",
+                            self.gpu_buffer().len(), effective_batch_size);
+                        return None;
+                    }
+                }
+            }
+        };
+
+        // Train on the batch (same path as train_step_gpu)
+        let loss = self.train_step_gpu(&batch);
+        self.increment_step_count();
+        self.maybe_update_target(self.step_count());
+        self.update_epsilon();
+        Some(loss)
     }
 }
 

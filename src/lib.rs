@@ -136,7 +136,7 @@ pub use features::{hotness_score, AccessRecord, AccessTracker, BlobFeatures, Hot
 pub use model::{Activation, ErisDefaults, Model};
 pub use models::{
     decode_action, encode_action, CombinedModel, CombinedModelConfig, ContextualBandit,
-    ContextualBanditConfig, QNetwork, QNetworkConfig,
+    ContextualBanditConfig, MetisModel, MetisModelExt, QNetwork, QNetworkConfig,
 };
 
 // Space types
@@ -155,6 +155,7 @@ pub use trace::{
 };
 
 // Training
+#[allow(deprecated)]
 pub use training::{
     train_agent, CheckpointMetadata, CombinedAgent, MockEnv, ReplayBuffer, TrainingConfig,
     TrainingResult, Transition, TransitionBatch,

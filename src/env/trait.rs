@@ -9,6 +9,7 @@ use std::collections::HashMap;
 /// # Fields
 ///
 /// * `observation` - The new state after taking the action
+/// * `action` - The action taken in this step
 /// * `reward` - The reward received for the transition
 /// * `done` - Whether the episode has ended
 /// * `info` - Additional diagnostic information
@@ -20,6 +21,7 @@ use std::collections::HashMap;
 ///
 /// let result = StepResult {
 ///     observation: vec![1.0, 2.0, 3.0],
+///     action: 0,
 ///     reward: 10.0,
 ///     done: false,
 ///     info: Info::new().with_metric("step", 10.0),
@@ -33,6 +35,8 @@ use std::collections::HashMap;
 pub struct StepResult {
     /// The observation after taking the action
     pub observation: Vec<f64>,
+    /// The action taken in this step
+    pub action: usize,
     /// The reward for taking the action
     pub reward: f64,
     /// Whether the episode is done

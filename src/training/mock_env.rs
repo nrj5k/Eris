@@ -329,6 +329,7 @@ impl Environment for MockEnv {
 
         StepResult {
             observation: self.state.clone(),
+            action,
             reward,
             done,
             info: Info::new()

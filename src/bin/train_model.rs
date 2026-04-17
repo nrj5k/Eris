@@ -1324,22 +1324,30 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
     println!("Action dim: {}", action_dim);
 
     // ADJUST BUFFER CAPACITY FOR LARGE STATE DIMENSIONS
+    // For large state dimensions, we need a bigger buffer for training,
+    // but we cap it to avoid OOM. The minimum ensures enough samples for batching.
     let effective_buffer_capacity = if state_dim > 20 {
-        let adjusted = (args.buffer_capacity / 2).max(10000); // Minimum 10k
-        println!(
-            "State dimension {} > 20, reducing buffer capacity: {} → {} (for GPU memory safety)",
-            state_dim, args.buffer_capacity, adjusted
-        );
+        // Use at least 1000 samples for training, but cap at the user's setting
+        // to avoid GPU memory issues.
+        let minimum = 1000;
+        let adjusted = args.buffer_capacity.max(minimum);
+        if adjusted > args.buffer_capacity {
+            println!(
+                "[STAGE:WARMUP] Increasing buffer capacity for state_dim={}: {} → {} (minimum for training)",
+                state_dim, args.buffer_capacity, adjusted
+            );
+        }
         adjusted
     } else {
         args.buffer_capacity
     };
 
-    // Calculate estimated GPU memory usage
-    let buffer_mem_mb = (effective_buffer_capacity * state_dim * 4 * 2) / (1024 * 1024); // ×2 for states + next_states
+    // HybridRingBuffer stores on CPU; GPU allocs only during sample_batch
+    let batch_mem_mb = (args.batch_size * state_dim * 4 * 5) / (1024 * 1024); // per batch
+    let buffer_mem_mb = (effective_buffer_capacity * state_dim * 4 * 2) / (1024 * 1024); // CPU storage
     println!(
-        "[STAGE:STATS] Estimated GPU buffer memory: ~{} MB (capacity={}, state_dim={})",
-        buffer_mem_mb, effective_buffer_capacity, state_dim
+        "[STAGE:STATS] Estimated memory: CPU ~{} MB (buffer), GPU ~{} MB (per batch) (capacity={}, state_dim={})",
+        buffer_mem_mb, batch_mem_mb, effective_buffer_capacity, state_dim
     );
 
     // Create DQN config

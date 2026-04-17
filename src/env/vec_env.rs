@@ -135,6 +135,7 @@ impl VecEnv {
             let (obs, reward, done) = env.step(action);
             results.push(StepResult {
                 observation: obs,
+                action,
                 reward,
                 done,
                 info,
@@ -250,6 +251,7 @@ impl VecEnv {
 
                 StepResult {
                     observation: obs,
+                    action,
                     reward,
                     done,
                     info,

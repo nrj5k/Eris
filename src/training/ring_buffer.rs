@@ -6,6 +6,7 @@ use rand::prelude::*;
 use rand::rng;
 
 /// Ring buffer with fixed capacity and index-based sampling
+#[deprecated(since = "0.2.0", note = "Use burnme-rly buffers instead")]
 #[derive(Clone)]
 pub struct RingBuffer {
     storage: Vec<Transition>,

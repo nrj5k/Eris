@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 /// Transition for experience replay
+#[deprecated(since = "0.2.0", note = "Use burnme-rly buffers instead")]
 #[derive(Debug, Clone)]
 pub struct Transition {
     pub state: Vec<f32>, // [32] - warp-aligned (5 tier sizes + 10 features + 17 padding)
@@ -11,6 +12,7 @@ pub struct Transition {
 }
 
 /// Experience replay buffer for DQN training
+#[deprecated(since = "0.2.0", note = "Use burnme-rly buffers instead")]
 pub struct ReplayBuffer {
     buffer: VecDeque<Transition>,
     capacity: usize,
@@ -90,6 +92,7 @@ impl ReplayBuffer {
 }
 
 /// Batch of transitions for training
+#[deprecated(since = "0.2.0", note = "Use burnme-rly buffers instead")]
 #[derive(Debug, Clone)]
 pub struct TransitionBatch {
     pub states: Vec<Vec<f32>>,

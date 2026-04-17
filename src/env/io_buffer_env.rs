@@ -507,6 +507,7 @@ impl Environment for IOBufferEnv {
 
         StepResult {
             observation,
+            action,
             reward,
             done,
             info: Info::new()

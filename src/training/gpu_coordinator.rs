@@ -44,8 +44,7 @@ use burn::tensor::backend::AutodiffBackend;
 use std::error::Error;
 
 /// Training metrics returned after completing training.
-///
-/// Contains aggregated statistics from the training run.
+/// Re-exported from burnme-rly (superset with best_reward and training_time_secs).
 ///
 /// # Fields
 ///
@@ -54,6 +53,8 @@ use std::error::Error;
 /// * `avg_reward` - Average reward across all episodes
 /// * `final_loss` - Average training loss from the final training steps
 /// * `steps_per_second` - Optional throughput metric (if measured)
+/// * `training_time_secs` - Optional total training time in seconds
+/// * `best_reward` - Best single-episode reward during training
 ///
 /// # Example
 ///
@@ -66,6 +67,8 @@ use std::error::Error;
 ///     avg_reward: 245.3,
 ///     final_loss: 0.152,
 ///     steps_per_second: Some(12500.0),
+///     training_time_secs: Some(60.0),
+///     best_reward: 312.5,
 /// };
 ///
 /// println!(
@@ -73,64 +76,14 @@ use std::error::Error;
 ///     metrics.total_episodes, metrics.avg_reward
 /// );
 /// ```
-#[derive(Debug, Clone)]
-pub struct TrainingMetrics {
-    /// Total environment steps across all environments
-    pub total_steps: usize,
-    /// Number of completed episodes
-    pub total_episodes: usize,
-    /// Average reward across all episodes
-    pub avg_reward: f64,
-    /// Average training loss from the final training steps
-    pub final_loss: f32,
-    /// Optional throughput metric (steps per second)
-    pub steps_per_second: Option<f64>,
-}
+pub use burnme_rly::coordinator::TrainingMetrics;
 
 /// Trait for selecting actions in batch for vectorized environments.
-///
-/// This trait enables efficient batched inference where a single forward
-/// pass processes observations from all parallel environments simultaneously.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// impl<B: AutodiffBackend> BatchedActionSelector<B> for DQNPolicy<B> {
-///     fn select_actions_batched(
-///         &self,
-///         observations: &[Vec<f64>],
-///         device: &B::Device,
-///         action_dim: usize,
-///         epsilon: f32,
-///     ) -> Vec<usize> {
-///         // Convert observations to batched tensor [batch_size, state_dim]
-///         // Run single forward pass through network
-///         // Apply epsilon-greedy selection
-///         // Return action for each environment
-///     }
-/// }
-/// ```
-pub trait BatchedActionSelector<B: AutodiffBackend> {
-    /// Select actions for all environments in a single batched forward pass.
-    ///
-    /// # Arguments
-    ///
-    /// * `observations` - Slice of observations, one per environment
-    /// * `device` - Device for tensor operations (GPU preferred)
-    /// * `action_dim` - Number of possible actions
-    /// * `epsilon` - Exploration rate for epsilon-greedy selection
-    ///
-    /// # Returns
-    ///
-    /// Vec of action indices, one per environment (same order as input)
-    fn select_actions_batched(
-        &self,
-        observations: &[Vec<f64>],
-        device: &B::Device,
-        action_dim: usize,
-        epsilon: f32,
-    ) -> Vec<usize>;
-}
+/// Re-exported from burnme-rly for DRY.
+pub use burnme_rly::traits::BatchedActionSelector;
+
+/// Double-buffer prefetch for overlapping CPU→GPU transfer with GPU training.
+pub use crate::training::prefetch::PrefetchBuffer;
 
 /// Trait for vectorized environments running multiple instances in parallel.
 ///
@@ -469,6 +422,26 @@ impl GpuTrainingCoordinator {
         // Reset all environments
         let mut observations = env.reset_all()?;
 
+        // Pre-fill buffer with random transitions for fast warmup
+        // (standard DQN practice — avoids slow cold-start where GPU is idle)
+        let buffer_len = agent.gpu_buffer().len();
+        if buffer_len < self.warmup_batch_size {
+            let needed = self.warmup_batch_size - buffer_len;
+            let action_dim = env.action_space().n;
+            let state_dim = env.observation_dim();
+            agent
+                .gpu_buffer_mut()
+                .fill_random(needed, action_dim, state_dim);
+            log::info!(
+                "[STAGE:WARMUP] Pre-filled buffer with {} random transitions (buffer now has {})",
+                needed,
+                agent.gpu_buffer().len()
+            );
+        }
+
+        // Initialize PrefetchBuffer for double-buffering
+        let mut prefetch = PrefetchBuffer::new();
+
         // Episode loop
         while episode_count < self.episodes {
             // Batched action selection - single forward pass for all envs
@@ -548,7 +521,7 @@ impl GpuTrainingCoordinator {
 
             if should_train {
                 tracing::debug!(
-                    "Calling train_step_gpu_native_with_config, steps_since_last_train: {}, buffer_len: {}, warmup_complete: {}, coordinator_warmup_batch_size: {}, coordinator_batch_size: {}",
+                    "Calling train_step_gpu_native_with_prefetch, steps_since_last_train: {}, buffer_len: {}, warmup_complete: {}, coordinator_warmup_batch_size: {}, coordinator_batch_size: {}",
                     steps_since_last_train,
                     agent.gpu_buffer().len(),
                     agent.is_warmup_complete(),
@@ -556,20 +529,33 @@ impl GpuTrainingCoordinator {
                     self.batch_size
                 );
 
-                // Use train_step_gpu_native_with_config to pass coordinator's batch sizes
-                // FIXES BUG: Agent's hardcoded warmup_batch_size (256) is now overridden
-                // by coordinator's configured warmup_batch_size (e.g., 1024)
-                let train_result = agent.train_step_gpu_native_with_config(
+                // Get any previously-prefetched batch for THIS training step
+                let prebuilt_batch = prefetch.take_current();
+
+                // Submit prefetch for the NEXT batch while we train THIS one
+                let effective_batch_size = if agent.is_warmup_complete() {
+                    self.batch_size
+                } else {
+                    self.warmup_batch_size.min(self.batch_size)
+                };
+                prefetch.submit_prefetch(agent.gpu_buffer(), effective_batch_size, device);
+
+                // Train using prebuilt batch if available, otherwise sample internally
+                let train_result = agent.train_step_gpu_native_with_prefetch(
                     steps_since_last_train,
                     device,
                     self.warmup_batch_size,
                     self.batch_size,
+                    prebuilt_batch,
                 );
+
+                // Swap — prefetch we just submitted becomes current for NEXT iteration
+                let _ = prefetch.swap();
 
                 match train_result {
                     Some(loss) => {
                         tracing::debug!(
-                            "train_step_gpu_native_with_config returned Some({:.4}), step_count: {}",
+                            "train_step_gpu_native_with_prefetch returned Some({:.4}), step_count: {}",
                             loss,
                             agent.step_count()
                         );
@@ -578,7 +564,7 @@ impl GpuTrainingCoordinator {
                     }
                     None => {
                         tracing::debug!(
-                            "train_step_gpu_native_with_config returned None! buffer_len: {}, warmup_complete: {}",
+                            "train_step_gpu_native_with_prefetch returned None! buffer_len: {}, warmup_complete: {}",
                             agent.gpu_buffer().len(),
                             agent.is_warmup_complete()
                         );
@@ -671,6 +657,8 @@ impl GpuTrainingCoordinator {
             avg_reward,
             final_loss,
             steps_per_second: None,
+            training_time_secs: None,
+            best_reward: best_reward as f64,
         })
     }
 
@@ -706,6 +694,7 @@ impl GpuTrainingCoordinator {
         let mut metrics = self.run_training(agent, env, device, checkpoint_prefix)?;
         let elapsed = start.elapsed();
 
+        metrics.training_time_secs = Some(elapsed.as_secs_f64());
         metrics.steps_per_second = Some(metrics.total_steps as f64 / elapsed.as_secs_f64());
 
         tracing::info!(
@@ -755,6 +744,8 @@ mod tests {
             avg_reward: 150.5,
             final_loss: 0.25,
             steps_per_second: Some(5000.0),
+            training_time_secs: None,
+            best_reward: 0.0,
         };
 
         assert_eq!(metrics.total_steps, 100_000);

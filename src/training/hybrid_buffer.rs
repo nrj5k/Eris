@@ -11,10 +11,10 @@
 //! - **O(1) Push**: No GPU allocations during push operations
 //! - **No VRAM Leak**: Memory stays constant during training
 
-use crate::training::tensor_buffer::TensorTransitionBatch;
 use crate::utils::backend_diagnostics::{detect_backend, log_backend_info};
 use crate::utils::timing::OneTimeDiag;
 use burn::tensor::{backend::Backend, Tensor, TensorData};
+use burnme_rly::buffer::TensorTransitionBatch;
 use tracing;
 
 /// Hybrid buffer: stores transitions on CPU, converts to GPU only on sampling
@@ -183,10 +183,10 @@ impl<B: Backend> HybridRingBuffer<B> {
 
         for &idx in &indices {
             batch_states.extend_from_slice(&self.states[idx]);
-            batch_actions.push(self.actions[idx] as i64);
+            batch_actions.push(self.actions[idx] as i32);
             batch_rewards.push(self.rewards[idx]);
             batch_next_states.extend_from_slice(&self.next_states[idx]);
-            batch_dones.push(self.dones[idx] as i64);
+            batch_dones.push(self.dones[idx]);
         }
 
         tracing::debug!(
@@ -196,29 +196,30 @@ impl<B: Backend> HybridRingBuffer<B> {
         );
 
         // Convert to GPU tensors ONCE per sample (not per push!)
+        // Using rank-2 format: [batch_size, 1] for actions/rewards/dones
         let states_tensor = Tensor::from_data(
             TensorData::new(batch_states, [batch_size, self.state_dim]).convert::<f32>(),
             device,
         );
         let actions_tensor = Tensor::from_data(
-            TensorData::new(batch_actions, [batch_size]).convert::<i64>(),
+            TensorData::new(batch_actions, [batch_size, 1]).convert::<i32>(),
             device,
         );
         let rewards_tensor = Tensor::from_data(
-            TensorData::new(batch_rewards, [batch_size]).convert::<f32>(),
+            TensorData::new(batch_rewards, [batch_size, 1]).convert::<f32>(),
             device,
         );
         let next_states_tensor = Tensor::from_data(
             TensorData::new(batch_next_states, [batch_size, self.state_dim]).convert::<f32>(),
             device,
         );
-        // Convert dones to f32 (1.0 for true, 0.0 for false)
+        // Convert dones to f32 (1.0 for true, 0.0 for false), shape [batch_size, 1]
         let batch_dones_f32: Vec<f32> = batch_dones
             .iter()
-            .map(|&d| if d != 0 { 1.0f32 } else { 0.0f32 })
+            .map(|&d| if d { 1.0f32 } else { 0.0f32 })
             .collect();
         let dones_tensor = Tensor::from_data(
-            TensorData::new(batch_dones_f32, [batch_size]).convert::<f32>(),
+            TensorData::new(batch_dones_f32, [batch_size, 1]).convert::<f32>(),
             device,
         );
 
@@ -257,6 +258,11 @@ impl<B: Backend> HybridRingBuffer<B> {
         self.size == self.capacity
     }
 
+    /// Check if buffer has enough samples for a batch
+    pub fn can_sample(&self, batch_size: usize) -> bool {
+        self.size >= batch_size
+    }
+
     /// Get state dimension
     pub fn state_dim(&self) -> usize {
         self.state_dim
@@ -271,6 +277,43 @@ impl<B: Backend> HybridRingBuffer<B> {
         self.rewards.clear();
         self.next_states.clear();
         self.dones.clear();
+    }
+
+    /// Fill the buffer with random transitions for warmup initialization.
+    ///
+    /// This allows the training loop to start with a pre-filled buffer,
+    /// avoiding the slow cold-start phase where the GPU sits idle waiting
+    /// for enough samples.
+    ///
+    /// # Arguments
+    /// * `num_transitions` - Number of random transitions to generate
+    /// * `action_dim` - Number of possible actions (actions sampled from [0, action_dim))
+    /// * `state_dim` - Dimension of state/observation vectors
+    ///
+    /// # Note
+    /// Random transitions have zero reward and are not terminal (done=false).
+    /// States and next_states are filled with small random values.
+    /// This is standard DQN practice (Mnih et al., 2015).
+    pub fn fill_random(&mut self, num_transitions: usize, action_dim: usize, state_dim: usize) {
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        let count = num_transitions.min(self.capacity - self.size);
+        for _ in 0..count {
+            let state: Vec<f32> = (0..state_dim)
+                .map(|_| rng.random_range(-1.0..1.0))
+                .collect();
+            let action = rng.random_range(0..action_dim);
+            let reward = 0.0; // Zero reward for random warmup
+            let next_state: Vec<f32> = (0..state_dim)
+                .map(|_| rng.random_range(-1.0..1.0))
+                .collect();
+            let done = false;
+            self.push(state, action, reward, next_state, done);
+        }
+        tracing::info!(
+            "[STAGE:WARMUP] Pre-filled buffer with {} random transitions (action_dim={}, state_dim={})",
+            count, action_dim, state_dim
+        );
     }
 }
 
@@ -471,11 +514,27 @@ mod tests {
         // Sample batch
         let batch = buffer.sample_batch(5, &device).unwrap();
 
-        // Verify tensor shapes
+        // Verify tensor shapes (rank-2 format for actions/rewards/dones)
         assert_eq!(batch.states.dims(), [5, 4]);
-        assert_eq!(batch.actions.dims(), [5]);
-        assert_eq!(batch.rewards.dims(), [5]);
+        assert_eq!(batch.actions.dims(), [5, 1]);
+        assert_eq!(batch.rewards.dims(), [5, 1]);
         assert_eq!(batch.next_states.dims(), [5, 4]);
-        assert_eq!(batch.dones.dims(), [5]);
+        assert_eq!(batch.dones.dims(), [5, 1]);
+    }
+
+    #[test]
+    fn test_hybrid_buffer_fill_random() {
+        let mut buffer = HybridRingBuffer::<TestBackend>::new(100, 4);
+        buffer.fill_random(50, 10, 4);
+        assert_eq!(buffer.len(), 50);
+        assert!(buffer.can_sample(32));
+    }
+
+    #[test]
+    fn test_hybrid_buffer_fill_random_caps_at_capacity() {
+        let mut buffer = HybridRingBuffer::<TestBackend>::new(10, 4);
+        buffer.fill_random(50, 10, 4);
+        assert_eq!(buffer.len(), 10); // Capped at capacity
+        assert!(buffer.is_full());
     }
 }

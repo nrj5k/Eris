@@ -175,13 +175,13 @@ use super::td_loss::compute_td_loss;
 use super::tensor_utils::{batch_to_tensors, state_to_tensor};
 use crate::config::DQNConfig;
 use crate::models::QNetwork;
-use crate::training::tensor_buffer::TensorTransitionBatch;
 use crate::training::HybridRingBuffer;
 use crate::utils::backend_diagnostics::log_backend_info;
 use crate::utils::timing::{log_step_timing, OneTimeDiag};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor};
+use burnme_rly::buffer::TensorTransitionBatch;
 use std::error::Error;
 use std::path::Path;
 use tracing;
@@ -675,29 +675,16 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
         let train_start = std::time::Instant::now();
 
         // Train DQN using GPU tensors directly (no CPU conversion)
-        // Clone tensors since we need to reshape without consuming
-        tracing::trace!("Reshaping actions, shape: {:?}", batch.actions.shape());
-        let actions_2d = batch
-            .actions
-            .clone()
-            .unsqueeze::<3>()
-            .reshape([batch.states.dims()[0], 1]);
-        let rewards_2d = batch
-            .rewards
-            .clone()
-            .unsqueeze::<3>()
-            .reshape([batch.states.dims()[0], 1]);
-        let dones_2d = batch
-            .dones
-            .clone()
-            .unsqueeze::<3>()
-            .reshape([batch.states.dims()[0], 1]);
+        // Batch has rank-2 data format [batch_size, 1], reshape for type signature
         tracing::trace!(
-            "Reshaped actions: {:?}, rewards: {:?}, dones: {:?}",
-            actions_2d.shape(),
-            rewards_2d.shape(),
-            dones_2d.shape()
+            "Batch shapes - actions: {:?}, rewards: {:?}, dones: {:?}",
+            batch.actions.shape(),
+            batch.rewards.shape(),
+            batch.dones.shape()
         );
+        let actions_2d = batch.actions.clone().reshape([batch.states.dims()[0], 1]);
+        let rewards_2d = batch.rewards.clone().reshape([batch.states.dims()[0], 1]);
+        let dones_2d = batch.dones.clone().reshape([batch.states.dims()[0], 1]);
 
         tracing::debug!(
             "Calling train_dqn_step, states shape: {:?}",
@@ -723,6 +710,62 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
         if step_count % self.config.target_update_freq == 0 {
             self.update_target_network();
         }
+    }
+
+    fn train_step_gpu_native_with_prefetch(
+        &mut self,
+        steps_since_last_train: usize,
+        device: &B::Device,
+        warmup_batch_size: usize,
+        full_batch_size: usize,
+        prebuilt_batch: Option<TensorTransitionBatch<B>>,
+    ) -> Option<f32> {
+        // Check training frequency using lib's canonical should_train
+        let should_train = crate::training::should_train(
+            self.is_warmup_complete(),
+            steps_since_last_train,
+            4, // train_frequency
+        );
+
+        if !should_train {
+            return None;
+        }
+
+        // Get the batch: either use the prefetched one or sample internally
+        let effective_batch_size = if self.is_warmup_complete() {
+            full_batch_size
+        } else {
+            let effective = warmup_batch_size.min(full_batch_size);
+            let buffer_len: usize = self.gpu_buffer().len();
+            if buffer_len >= full_batch_size {
+                self.set_warmup_complete(true);
+            }
+            effective
+        };
+
+        let batch = match prebuilt_batch {
+            Some(batch) => batch,
+            None => {
+                match self
+                    .gpu_buffer_mut()
+                    .sample_batch(effective_batch_size, device)
+                {
+                    Some(batch) => batch,
+                    None => {
+                        log::trace!("[STAGE:DIAG] train_step_gpu_native_with_prefetch: Not enough samples (have {}, need {}), skipping",
+                            self.gpu_buffer().len(), effective_batch_size);
+                        return None;
+                    }
+                }
+            }
+        };
+
+        // Train on the batch (same path as train_step_gpu)
+        let loss = self.train_step_gpu(&batch);
+        self.increment_step_count();
+        self.maybe_update_target(self.step_count());
+        self.update_epsilon();
+        Some(loss)
     }
 }
 

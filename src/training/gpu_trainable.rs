@@ -16,8 +16,8 @@
 //!
 //! Extract episode loop to make this fully generic (Option 3 unification).
 
-use crate::training::tensor_buffer::TensorTransitionBatch;
 use burn::tensor::backend::AutodiffBackend;
+use burnme_rly::buffer::TensorTransitionBatch;
 use burnme_rly::warmup;
 use tracing;
 
@@ -114,6 +114,165 @@ pub trait GpuTrainable<B: AutodiffBackend> {
         )
     }
 
+    /// Perform a self-contained GPU-native training step with an optional pre-built batch.
+    ///
+    /// When `prebuilt_batch` is `Some(batch)`, uses that batch directly (skips internal `sample_batch()`).
+    /// When `prebuilt_batch` is `None`, falls back to calling `sample_batch()` internally.
+    ///
+    /// This enables double-buffering: while the GPU trains on batch N, the CPU can
+    /// prepare batch N+1 via `PrefetchBuffer`, then pass it here.
+    ///
+    /// # Arguments
+    /// * `steps_since_last_train` - Steps since last training (used for training frequency)
+    /// * `device` - GPU device for tensor operations
+    /// * `warmup_batch_size` - Batch size during warmup (from coordinator)
+    /// * `full_batch_size` - Full batch size after warmup (from coordinator)
+    /// * `prebuilt_batch` - Optional pre-built batch from prefetch buffer
+    ///
+    /// # Returns
+    /// * `Some(loss)` if training occurred
+    /// * `None` if skipped (not time to train yet)
+    fn train_step_gpu_native_with_prefetch(
+        &mut self,
+        steps_since_last_train: usize,
+        device: &B::Device,
+        warmup_batch_size: usize,
+        full_batch_size: usize,
+        prebuilt_batch: Option<TensorTransitionBatch<B>>,
+    ) -> Option<f32> {
+        // CRITICAL DEBUG: Entry point logging
+        tracing::debug!(
+            "train_step_gpu_native_with_prefetch ENTRY, step_count: {}, steps_since_last_train: {}, buffer_len: {}, warmup_batch_size: {}, full_batch_size: {}, has_prefetch: {}",
+            self.step_count(),
+            steps_since_last_train,
+            self.gpu_buffer().len(),
+            warmup_batch_size,
+            full_batch_size,
+            prebuilt_batch.is_some()
+        );
+
+        // Check training frequency using lib's canonical should_train
+        let should_train = warmup::should_train(
+            self.is_warmup_complete(),
+            steps_since_last_train,
+            4, // train_frequency
+        );
+        tracing::debug!(
+            "should_train: {} (warmup_complete={}, steps_since_last_train={})",
+            should_train,
+            self.is_warmup_complete(),
+            steps_since_last_train
+        );
+
+        if !should_train {
+            tracing::debug!("train_step_gpu_native_with_prefetch: SKIPPING (should_train=false)");
+            return None;
+        }
+
+        // Get the batch either from the prefetch or by sampling internally
+        let batch = match prebuilt_batch {
+            Some(batch) => {
+                tracing::debug!(
+                    "Using pre-built batch, batch.states.shape: {:?}",
+                    batch.states.shape()
+                );
+                batch
+            }
+            None => {
+                // Fall back to internal sampling
+                let effective_batch_size = if self.is_warmup_complete() {
+                    full_batch_size
+                } else {
+                    let effective = warmup_batch_size.min(full_batch_size);
+                    let buffer_len: usize = self.gpu_buffer().len();
+                    if buffer_len >= full_batch_size {
+                        self.set_warmup_complete(true);
+                    }
+                    effective
+                };
+                tracing::debug!(
+                    "Calling sample_batch(batch_size={}), buffer_len: {}",
+                    effective_batch_size,
+                    self.gpu_buffer().len()
+                );
+                match self
+                    .gpu_buffer_mut()
+                    .sample_batch(effective_batch_size, device)
+                {
+                    Some(batch) => {
+                        tracing::debug!(
+                            "sample_batch SUCCESS, batch.states.shape: {:?}",
+                            batch.states.shape()
+                        );
+                        batch
+                    }
+                    None => {
+                        tracing::debug!(
+                            "sample_batch returned None! buffer_len: {}, batch_size requested: {}",
+                            self.gpu_buffer().len(),
+                            effective_batch_size
+                        );
+                        return None;
+                    }
+                }
+            }
+        };
+
+        // GPU DIAGNOSTIC: Time the entire train_step_gpu_native call
+        static FIRST_CALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        let is_first = FIRST_CALL.load(std::sync::atomic::Ordering::Relaxed);
+        let step_start = std::time::Instant::now();
+
+        // Perform training step
+        let train_start = std::time::Instant::now();
+        tracing::debug!(
+            "Calling train_step_gpu, batch.states.shape: {:?}",
+            batch.states.shape()
+        );
+        let loss = self.train_step_gpu(&batch);
+        let train_elapsed = train_start.elapsed();
+        tracing::debug!("train_step_gpu returned loss: {:.4}", loss);
+
+        if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
+            tracing::debug!(
+                "[STAGE:DIAG] train_step_gpu_native_with_prefetch #{}: train_step_gpu took {:?} (loss={:.4})",
+                self.step_count(),
+                train_elapsed,
+                loss
+            );
+        }
+
+        // Update step count and target network
+        self.increment_step_count();
+        let step_count = self.step_count();
+        tracing::debug!(
+            "increment_step_count called, new step_count: {}",
+            step_count
+        );
+        self.maybe_update_target(step_count);
+
+        // Decay epsilon
+        self.update_epsilon();
+        tracing::debug!("update_epsilon called, new epsilon: {:.4}", self.epsilon());
+
+        // GPU DIAGNOSTIC: Total step timing
+        let total_elapsed = step_start.elapsed();
+        if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
+            tracing::debug!(
+                "[STAGE:DIAG] train_step_gpu_native_with_prefetch #{}: TOTAL took {:?}",
+                self.step_count(),
+                total_elapsed
+            );
+            FIRST_CALL.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        tracing::debug!(
+            "train_step_gpu_native_with_prefetch EXIT, returning Some({:.4})",
+            loss
+        );
+        Some(loss)
+    }
+
     /// Perform a self-contained GPU-native training step with configurable batch sizes.
     ///
     /// This variant allows the coordinator to override batch sizes, fixing the issue
@@ -139,142 +298,13 @@ pub trait GpuTrainable<B: AutodiffBackend> {
         warmup_batch_size: usize,
         full_batch_size: usize,
     ) -> Option<f32> {
-        // CRITICAL DEBUG: Entry point logging
-        tracing::debug!(
-            "train_step_gpu_native_with_config ENTRY, step_count: {}, steps_since_last_train: {}, buffer_len: {}, warmup_batch_size: {}, full_batch_size: {}",
-            self.step_count(),
+        self.train_step_gpu_native_with_prefetch(
             steps_since_last_train,
-            self.gpu_buffer().len(),
+            device,
             warmup_batch_size,
-            full_batch_size
-        );
-
-        // Check training frequency using lib's canonical should_train
-        let should_train = warmup::should_train(
-            self.is_warmup_complete(),
-            steps_since_last_train,
-            4, // train_frequency
-        );
-        tracing::debug!(
-            "should_train: {} (warmup_complete={}, steps_since_last_train={})",
-            should_train,
-            self.is_warmup_complete(),
-            steps_since_last_train
-        );
-
-        if !should_train {
-            tracing::debug!("train_step_gpu_native_with_config: SKIPPING (should_train=false)");
-            return None;
-        }
-
-        // Get effective batch size using coordinator's warmup_batch_size (FIXES THE BUG!)
-        let batch_size = self.effective_batch_size_with_config(full_batch_size, warmup_batch_size);
-        tracing::debug!(
-            "effective_batch_size_with_config: {}, full_batch_size: {}, warmup_batch_size: {}",
-            batch_size,
             full_batch_size,
-            warmup_batch_size
-        );
-
-        // GPU DIAGNOSTIC: Time the entire train_step_gpu_native call
-        static FIRST_CALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-        let is_first = FIRST_CALL.load(std::sync::atomic::Ordering::Relaxed);
-        let step_start = std::time::Instant::now();
-
-        // Sample from GPU buffer
-        let sample_start = std::time::Instant::now();
-        tracing::debug!(
-            "Calling sample_batch(batch_size={}), buffer_len: {}",
-            batch_size,
-            self.gpu_buffer().len()
-        );
-        let batch = self.gpu_buffer_mut().sample_batch(batch_size, device);
-
-        // CRITICAL DEBUG: Check if sample_batch returned None
-        let batch = match batch {
-            Some(b) => {
-                tracing::debug!(
-                    "sample_batch SUCCESS, batch.states.shape: {:?}",
-                    b.states.shape()
-                );
-                b
-            }
-            None => {
-                tracing::debug!(
-                    "sample_batch returned None! buffer_len: {}, batch_size requested: {}",
-                    self.gpu_buffer().len(),
-                    batch_size
-                );
-                return None;
-            }
-        };
-
-        let sample_elapsed = sample_start.elapsed();
-
-        if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
-            tracing::debug!(
-                "[STAGE:DIAG] train_step_gpu_native_with_config #{}: sample_batch(batch_size={}) took {:?}",
-                self.step_count(),
-                batch_size,
-                sample_elapsed
-            );
-            if sample_elapsed.as_millis() > 10 {
-                tracing::warn!("  SLOW sample_batch (>10ms) - data transfer may be on CPU");
-            }
-        }
-
-        // Perform training step
-        let train_start = std::time::Instant::now();
-        tracing::debug!(
-            "Calling train_step_gpu, batch.states.shape: {:?}",
-            batch.states.shape()
-        );
-        let loss = self.train_step_gpu(&batch);
-        let train_elapsed = train_start.elapsed();
-        tracing::debug!("train_step_gpu returned loss: {:.4}", loss);
-
-        if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
-            tracing::debug!(
-                "[STAGE:DIAG] train_step_gpu_native_with_config #{}: train_step_gpu took {:?} (loss={:.4})",
-                self.step_count(),
-                train_elapsed,
-                loss
-            );
-        }
-
-        // Update step count and target network
-        self.increment_step_count();
-        let step_count = self.step_count();
-        tracing::debug!(
-            "increment_step_count called, new step_count: {}",
-            step_count
-        );
-        self.maybe_update_target(step_count);
-
-        // Decay epsilon
-        self.update_epsilon();
-        tracing::debug!("update_epsilon called, new epsilon: {:.4}", self.epsilon());
-
-        // GPU DIAGNOSTIC: Total step timing
-        let total_elapsed = step_start.elapsed();
-        if is_first || self.step_count() <= 3 || self.step_count() % 500 == 0 {
-            tracing::debug!(
-                "[STAGE:DIAG] train_step_gpu_native_with_config #{}: TOTAL took {:?} (sample={:?}, train={:?})",
-                self.step_count(),
-                total_elapsed,
-                sample_elapsed,
-                train_elapsed
-            );
-            // GPU: total step < 50ms for batch_size=2048
-            // CPU: total step > 100ms for batch_size=2048
-            FIRST_CALL.store(false, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        tracing::debug!(
-            "train_step_gpu_native_with_config EXIT, returning Some({:.4})",
-            loss
-        );
-        Some(loss)
+            None,
+        )
     }
 
     /// Get effective batch size (handles warmup logic).
