@@ -9,7 +9,7 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 
 [features]
-default = ["wgpu", "parallel"]
+default = ["wgpu", "parallel", "spirv"]
 # Backend features (mutually exclusive - choose ONE)
 # CPU backend (no GPU)
 cpu = ["burn/ndarray", "burn/train", "burn/dataset"]
@@ -41,6 +41,9 @@ profiling = ["tracy-client"]
 
 # Parallel environment stepping
 parallel = ["rayon"]
+
+# SPIR-V support for wgpu (Vulkan targets with better performance)
+spirv = ["wgpu", "burn/ir"]
 
 [dependencies]
 burnme-rly = { path = "burnme-rly" }

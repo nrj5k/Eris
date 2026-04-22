@@ -25,7 +25,8 @@
 //! - Keep both during transition period
 
 use burn::grad_clipping::GradientClippingConfig;
-use burn::optim::{AdamConfig, GradientsAccumulator, GradientsParams, Optimizer};
+use burn::optim::adaptor::OptimizerAdaptor;
+use burn::optim::{Adam, AdamConfig, GradientsAccumulator, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
 use std::path::Path;
@@ -124,6 +125,8 @@ pub struct CombinedAgent<B: AutodiffBackend> {
     pub warmup_batch_size: usize,
     /// Whether warmup phase is complete
     pub warmup_complete: bool,
+    /// Cached Adam optimizer (reused across steps instead of re-created)
+    optimizer: OptimizerAdaptor<Adam, CombinedModel<B>, B>,
 }
 
 impl<B: AutodiffBackend> CombinedAgent<B> {
@@ -149,6 +152,16 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         let state_dim = model_config.bandit.input_dim;
         let buffer = HybridRingBuffer::new(config.buffer_capacity, state_dim);
 
+        // Initialize optimizer once (cached for reuse)
+        let optimizer = AdamConfig::new()
+            .with_beta_1(0.9)
+            .with_beta_2(0.999)
+            .with_epsilon(1e-8)
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(
+                config.max_gradient_norm,
+            )))
+            .init();
+
         Self {
             model,
             target_model,
@@ -161,9 +174,10 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             accumulation_counter: 0,
             accumulated_loss: Tensor::zeros([1], &device),
             accumulated_loss_count: 0,
-            loss_sync_freq: 10,     // Sync every 10 steps
+            loss_sync_freq: 500,    // Sync every 500 steps
             warmup_batch_size: 256, // Start with 256, fills in 8 steps (with 32 envs)
             warmup_complete: false,
+            optimizer,
         }
     }
 
@@ -186,13 +200,13 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
 
         // Tensors are already on GPU - no conversion needed!
         // Actions are [batch_size, 1] Int tensor -> squeeze to [batch_size]
-        let actions: Tensor<B, 1, Int> = batch.actions.clone().squeeze();
+        let actions: Tensor<B, 1, Int> = batch.actions.clone().squeeze(); // squeeze() creates new tensor
         // Rewards are [batch_size, 1] -> squeeze to [batch_size]
-        let rewards: Tensor<B, 1> = batch.rewards.clone().squeeze();
-        let states = batch.states.clone();
-        let next_states = batch.next_states.clone();
+        let rewards: Tensor<B, 1> = batch.rewards.clone().squeeze(); // squeeze() creates new tensor
+        let states = batch.states.clone(); // still needed - forward() takes ownership
+        let next_states = batch.next_states.clone(); // still needed
         // Dones are [batch_size, 1] -> squeeze to [batch_size]
-        let dones: Tensor<B, 1> = batch.dones.clone().squeeze();
+        let dones: Tensor<B, 1> = batch.dones.clone().squeeze(); // squeeze() creates new tensor
 
         // Forward pass through policy network (with gradients)
         let (_, _, q_values) = self.model.forward(states);
@@ -203,8 +217,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         let q_selected: Tensor<B, 1> = q_values.gather(1, actions_2d).squeeze();
 
         // Forward pass through target network (NO gradients)
-        let target_model = self.target_model.clone();
-        let (_, _, target_q_values) = target_model.forward(next_states.detach());
+        let (_, _, target_q_values) = self.target_model.forward(next_states.detach());
 
         // Compute max Q for next states
         let max_next_q = target_q_values.max_dim(1).squeeze();
@@ -221,19 +234,13 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
 
         // Backpropagation
         let grads = loss.backward();
+        // Detach loss immediately to drop computation graph before optimizer step
+        let loss_detached = loss.detach();
+        
         let grads_params = GradientsParams::from_grads(grads, &self.model);
 
-        // Update model with optimizer
-        let mut optimizer = AdamConfig::new()
-            .with_beta_1(0.9)
-            .with_beta_2(0.999)
-            .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(
-                self.config.max_gradient_norm,
-            )))
-            .init();
-
-        self.model = optimizer.step(self.config.learning_rate, self.model.clone(), grads_params);
+        // Update model with CACHED optimizer (massive speedup!)
+        self.model = self.optimizer.step(self.config.learning_rate, self.model.clone(), grads_params);
 
         // Soft update target network
         self.step_count += 1;
@@ -242,7 +249,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         }
 
         // Return loss value (async - may not sync every step)
-        self.report_loss_async(loss).unwrap_or(0.0)
+        self.report_loss_async(loss_detached).unwrap_or(0.0)
     }
 
     /// Training step using GPU-native batch sampling (no CPU→GPU transfer).
@@ -303,8 +310,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             let q_selected: Tensor<B, 1> = q_values.gather(1, actions_2d).squeeze();
 
             // Forward pass through target network (NO gradients)
-            let target_model = self.target_model.clone();
-            let (_, _, target_q_values) = target_model.forward(next_states.detach());
+            let (_, _, target_q_values) = self.target_model.forward(next_states.detach());
 
             // Compute max Q for next states
             let max_next_q = target_q_values.max_dim(1).squeeze();
@@ -322,20 +328,13 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
 
             // Backpropagation
             let grads = loss.backward();
+            // Detach loss immediately to drop computation graph before optimizer step
+            let loss_detached = loss.detach();
             let grads_params = GradientsParams::from_grads(grads, &self.model);
 
-            // Update model with optimizer
-            let mut optimizer = AdamConfig::new()
-                .with_beta_1(0.9)
-                .with_beta_2(0.999)
-                .with_epsilon(1e-8)
-                .with_grad_clipping(Some(GradientClippingConfig::Norm(
-                    self.config.max_gradient_norm,
-                )))
-                .init();
-
+            // Update model with CACHED optimizer (massive speedup!)
             self.model =
-                optimizer.step(self.config.learning_rate, self.model.clone(), grads_params);
+                self.optimizer.step(self.config.learning_rate, self.model.clone(), grads_params);
 
             // Update target network and epsilon
             self.step_count += 1;
@@ -346,7 +345,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             self.epsilon = (self.epsilon * self.config.epsilon_decay).max(self.config.epsilon_end);
 
             // Return loss value (async)
-            return self.report_loss_async(loss);
+            return self.report_loss_async(loss_detached);
         }
 
         None
@@ -356,7 +355,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
     /// Returns the loss value if synced, None if accumulated on GPU.
     pub fn report_loss_async(&mut self, loss: Tensor<B, 1>) -> Option<f32> {
         // Accumulate loss on GPU
-        self.accumulated_loss = self.accumulated_loss.clone() + loss;
+        self.accumulated_loss = self.accumulated_loss.clone() + loss.detach();
         self.accumulated_loss_count += 1;
 
         // Only sync to CPU periodically
@@ -470,8 +469,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
 
         // Forward pass through target network (NO gradients)
         // Detach next_states to prevent gradient flow through target network
-        let target_model = self.target_model.clone();
-        let (_, _, target_q_values) = target_model.forward(next_states.detach());
+        let (_, _, target_q_values) = self.target_model.forward(next_states.detach());
 
         // Compute max Q for next states
         let max_next_q = target_q_values.max_dim(1).squeeze(); // [batch_size]
@@ -499,24 +497,10 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             let grads = loss.backward();
             let grads_params = GradientsParams::from_grads(grads, &self.model);
 
-            // Clip gradients by norm before applying
-            // Note: In practice, gradient clipping is done during optimizer creation in Burn.
-            // This placeholder exists for when we can access gradient norms in Burn.
-            let clipped_grads = self.clip_gradients(grads_params, self.config.max_gradient_norm);
-
-            // Create optimizer with gradient clipping
+            // Update model with CACHED optimizer (massive speedup!)
             // DEPRECATED: Manual optimizer.step() - Burn TrainStep handles this automatically
-            let mut optimizer = AdamConfig::new()
-                .with_beta_1(0.9)
-                .with_beta_2(0.999)
-                .with_epsilon(1e-8)
-                .with_grad_clipping(Some(GradientClippingConfig::Norm(
-                    self.config.max_gradient_norm,
-                )))
-                .init();
-
             self.model =
-                optimizer.step(self.config.learning_rate, self.model.clone(), clipped_grads);
+                self.optimizer.step(self.config.learning_rate, self.model.clone(), grads_params);
         }
 
         // Soft update target network periodically
@@ -597,8 +581,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         let best_actions = next_q_policy.argmax(1);
 
         // 3. Get Q-values from target network for next states (NO gradients)
-        let target_model = self.target_model.clone();
-        let (_, _, target_q_values) = target_model.forward(next_states.detach());
+        let (_, _, target_q_values) = self.target_model.forward(next_states.detach());
 
         // 4. Evaluate selected action using target network (gather)
         let max_next_q = target_q_values
@@ -684,21 +667,10 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         // Apply accumulated gradients
         let grads = self.accumulated_grads.grads();
 
-        // Update optimizer with accumulated gradients
+        // Update model with CACHED optimizer (massive speedup!)
         // Gradients were already scaled by 1/accumulation_steps during backward,
         // so use the original learning rate
-        self.model = {
-            let mut optimizer = AdamConfig::new()
-                .with_beta_1(0.9)
-                .with_beta_2(0.999)
-                .with_epsilon(1e-8)
-                .with_grad_clipping(Some(GradientClippingConfig::Norm(
-                    self.config.max_gradient_norm,
-                )))
-                .init();
-
-            optimizer.step(self.config.learning_rate, self.model.clone(), grads)
-        };
+        self.model = self.optimizer.step(self.config.learning_rate, self.model.clone(), grads);
 
         // Update target network and epsilon (like regular train_step)
         self.step_count += 1;
@@ -883,6 +855,16 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         let state_dim = model_config.bandit.input_dim;
         let buffer = HybridRingBuffer::new(config.buffer_capacity, state_dim);
 
+        // Initialize optimizer once (cached for reuse)
+        let optimizer = AdamConfig::new()
+            .with_beta_1(0.9)
+            .with_beta_2(0.999)
+            .with_epsilon(1e-8)
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(
+                config.max_gradient_norm,
+            )))
+            .init();
+
         Ok(Self {
             model,
             target_model,
@@ -895,9 +877,10 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             accumulation_counter: 0,
             accumulated_loss: Tensor::zeros([1], &device),
             accumulated_loss_count: 0,
-            loss_sync_freq: 10,     // Sync every 10 steps
+            loss_sync_freq: 500,    // Sync every 500 steps
             warmup_batch_size: 256, // Start with 256, fills in 8 steps (with 32 envs)
             warmup_complete: false,
+            optimizer,
         })
     }
 

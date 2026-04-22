@@ -151,6 +151,9 @@ pub fn train_agent<B: AutodiffBackend, E: Environment<Observation = Vec<f64>, Ac
             if agent.buffer.len() >= agent.config.batch_size {
                 if let Some(loss) = agent.train_step_gpu_native(agent.config.batch_size) {
                     losses.push(loss);
+                    if losses.len() > 10000 {
+                        losses.drain(0..5000);
+                    }
                 }
             }
 
@@ -287,6 +290,9 @@ pub fn train_agent_burn<
             if agent.buffer.len() >= agent.config.batch_size {
                 if let Some(loss) = agent.train_step_gpu_native(agent.config.batch_size) {
                     losses.push(loss);
+                    if losses.len() > 10000 {
+                        losses.drain(0..5000);
+                    }
 
                     // Update target network if needed
                     if target_callback.should_update() {
@@ -406,6 +412,9 @@ pub fn train_agent_with_metrics<
             if agent.buffer.len() >= agent.config.batch_size {
                 if let Some(loss) = agent.train_step_gpu_native(agent.config.batch_size) {
                     losses.push(loss);
+                    if losses.len() > 10000 {
+                        losses.drain(0..5000);
+                    }
                     episode_loss += loss;
                     loss_count += 1;
 

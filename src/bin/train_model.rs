@@ -720,6 +720,7 @@ fn run_metis_v2_training<B: burn::tensor::backend::AutodiffBackend>(
     policy.buffer = buffer;
 
     println!("MetisV2 policy initialized!");
+    burnme_rly::init_logging();
 
     // Create coordinator using burnme_rly GpuTrainingCoordinator
     // Note: VecEnv implements burnme_rly::VecEnvironment via re-export
