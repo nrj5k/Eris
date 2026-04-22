@@ -66,11 +66,11 @@ pub use loss::{
 };
 pub use models::{
     ComposableModel, ComposeConfig, MetisV2Config, MetisV2Policy, ParallelCompose,
-    SequentialCompose,
+    PpoModel, PpoModelConfig, SequentialCompose,
 };
 pub use prefetch::PrefetchBuffer;
 pub use space::DiscreteSpace;
-pub use trainers::{DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig};
+pub use trainers::{DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig, PpoTrainer, PpoTrainerConfig};
 pub use traits::{BatchedActionSelector, GpuTrainable, GpuTrainableExt, VecEnvironment};
 pub use warmup::{should_train, train_step_with_warmup, train_step_with_warmup_config};
 

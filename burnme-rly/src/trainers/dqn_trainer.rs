@@ -97,7 +97,7 @@ impl Default for DQNTrainerConfig {
             target_update_freq: 1000,
             max_gradient_norm: 1.0,
             // NEW defaults:
-            loss_sync_freq: 100,    // Sync every 100 steps (Metis optimization)
+            loss_sync_freq: 500,    // Sync every 500 steps (Metis optimization)
             warmup_steps: 1000,     // 1000 steps of warmup
             warmup_batch_size: 256, // Smaller batches during warmup
         }
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn test_config_new_async_fields_defaults() {
         let config = DQNTrainerConfig::default();
-        assert_eq!(config.loss_sync_freq, 100);
+        assert_eq!(config.loss_sync_freq, 500);
         assert_eq!(config.warmup_steps, 1000);
         assert_eq!(config.warmup_batch_size, 256);
     }

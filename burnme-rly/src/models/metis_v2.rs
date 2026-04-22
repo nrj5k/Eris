@@ -70,7 +70,7 @@ impl Default for MetisV2Config {
             warmup_batch_size: 256,
             buffer_capacity: 10000,
             target_update_freq: 100,
-            loss_sync_freq: 100,
+            loss_sync_freq: 500,
         }
     }
 }
@@ -269,17 +269,21 @@ where
         let current_q = q_values.gather(1, batch.actions.clone());
 
         // 5. Double DQN target
+        // Clone next_states once and reuse
+        let next_states = batch.next_states.clone();
         // Select actions using policy model
-        let next_q_policy = self.model.forward(batch.next_states.clone());
+        let next_q_policy = self.model.forward(next_states.clone());
         let best_actions = next_q_policy.argmax(1).reshape([batch_size, 1]);
 
         // Evaluate using target model (detached)
-        let next_q_target = self.target_model.forward(batch.next_states.clone());
+        let next_q_target = self.target_model.forward(next_states);
         let max_next_q = next_q_target.gather(1, best_actions).detach();
 
+        // Clone rewards once and reuse
+        let rewards = batch.rewards.clone();
         // Compute TD target: r + γ * max_next_q * (1 - done)
-        let target_q = batch.rewards.clone()
-            + Tensor::<B, 2>::full_like(&batch.rewards, self.config.gamma)
+        let target_q = rewards.clone()
+            + Tensor::<B, 2>::full_like(&rewards, self.config.gamma)
                 * max_next_q
                 * (Tensor::<B, 2>::ones_like(&batch.dones) - batch.dones.clone());
 
@@ -288,11 +292,11 @@ where
 
         // 7. Bandit loss: MSE(importance, normalized_rewards)
         // Normalize rewards to [0, 1]
-        let min_reward = batch.rewards.clone().min().reshape([1, 1]);
-        let max_reward = batch.rewards.clone().max().reshape([1, 1]);
-        let reward_range = max_reward.clone() - min_reward.clone();
+        let min_reward = rewards.clone().min().reshape([1, 1]);
+        let max_reward = rewards.clone().max().reshape([1, 1]);
+        let reward_range = max_reward - min_reward.clone();
         let epsilon = Tensor::<B, 2>::full([1, 1], 1e-8, &self.device);
-        let normalized_rewards = (batch.rewards.clone() - min_reward) / (reward_range + epsilon);
+        let normalized_rewards = (rewards.clone() - min_reward) / (reward_range + epsilon);
 
         let bandit_loss = (importance - normalized_rewards).powf_scalar(2.0).mean();
 
@@ -318,7 +322,7 @@ where
         }
 
         // 12. Async loss accumulation
-        self.accumulated_loss = self.accumulated_loss.clone() + joint_loss.clone();
+        self.accumulated_loss = self.accumulated_loss.clone() + joint_loss;
         self.accumulated_count += 1;
 
         if self

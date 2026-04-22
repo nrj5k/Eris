@@ -235,7 +235,7 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
             optimizer,
             accumulated_loss: Tensor::<B, 1>::zeros([1], &device),
             accumulated_count: 0,
-            loss_sync_freq: 100,
+            loss_sync_freq: 500,
             warmup_complete: false,
         })
     }

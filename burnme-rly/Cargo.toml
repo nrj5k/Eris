@@ -21,6 +21,7 @@ cuda = ["burn/cuda", "burn/autodiff", "burn/train"]
 rocm = ["burn/rocm", "burn/autodiff", "burn/train"]
 wgpu = ["burn/wgpu", "burn/autodiff", "burn/train"]
 cpu = ["burn/ndarray", "burn/train"]
+spirv = ["wgpu", "burn/ir"]
 
 [dev-dependencies]
 burn = { version = "0.20", features = ["ndarray", "autodiff"] }
@@ -30,3 +31,11 @@ criterion = "0.8"
 name = "training_comparison"
 harness = false
 required-features = ["cuda"]
+
+[[bench]]
+name = "rl_comparison"
+harness = false
+
+[[bench]]
+name = "batch_size_sweep"
+harness = false
