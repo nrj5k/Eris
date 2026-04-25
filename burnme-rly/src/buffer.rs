@@ -3,6 +3,7 @@
 //! This module implements a dual-layer architecture for experience replay:
 //! - **CpuRingBuffer**: Stores transitions on CPU with O(1) push and random sampling
 //! - **TensorTransitionBatch**: GPU tensor batch with `from_transitions()` conversion
+//! - **HybridRingBuffer**: CPU storage with GPU-native batch sampling
 //!
 //! # Architecture
 //!
@@ -35,11 +36,58 @@
 //! }
 //! ```
 
-use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use rand::prelude::*;
 use rand::rng;
-use std::collections::VecDeque;
+
+/// Common trait for buffer operations used by the coordinator.
+/// Implemented by both CpuRingBuffer and HybridRingBuffer.
+pub trait BufferOps {
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn can_sample(&self, batch_size: usize) -> bool;
+    fn fill_random(&mut self, num_transitions: usize, action_dim: usize, state_dim: usize);
+    fn push_batch(&mut self, transitions: Vec<Transition>);
+}
+
+impl BufferOps for CpuRingBuffer {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn can_sample(&self, batch_size: usize) -> bool {
+        self.can_sample(batch_size)
+    }
+
+    fn fill_random(&mut self, num_transitions: usize, action_dim: usize, state_dim: usize) {
+        self.fill_random(num_transitions, action_dim, state_dim);
+    }
+
+    fn push_batch(&mut self, transitions: Vec<Transition>) {
+        self.push_batch(transitions);
+    }
+}
+
+impl<B: Backend> BufferOps for HybridRingBuffer<B> {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn can_sample(&self, batch_size: usize) -> bool {
+        self.can_sample(batch_size)
+    }
+
+    fn fill_random(&mut self, num_transitions: usize, action_dim: usize, state_dim: usize) {
+        self.fill_random(num_transitions, action_dim, state_dim);
+    }
+
+    fn push_batch(&mut self, transitions: Vec<Transition>) {
+        self.push_batch_transitions(transitions);
+    }
+}
 
 /// Single transition tuple (s, a, r, s', done)
 #[derive(Debug, Clone, PartialEq)]
@@ -691,6 +739,109 @@ impl<B: Backend> HybridRingBuffer<B> {
             "[STAGE:DIAG] HybridRingBuffer: Pushed batch of {} transitions",
             batch_size
         );
+    }
+
+    /// Push batch of transitions (compatibility with CpuRingBuffer API).
+    ///
+    /// Decomposes transitions into separate vectors and calls push_batch().
+    ///
+    /// # Arguments
+    ///
+    /// * `transitions` - Vector of transitions to push
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use burnme_rly::buffer::{HybridRingBuffer, Transition};
+    ///
+    /// let mut buffer = HybridRingBuffer::<NdArray>::new(10_000, 32);
+    ///
+    /// let transitions = vec![
+    ///     Transition::new(vec![1.0; 32], 0, 0.5, vec![2.0; 32], false),
+    ///     Transition::new(vec![3.0; 32], 1, -0.3, vec![4.0; 32], true),
+    /// ];
+    ///
+    /// buffer.push_batch_transitions(transitions);
+    /// assert_eq!(buffer.len(), 2);
+    /// ```
+    pub fn push_batch_transitions(&mut self, transitions: Vec<Transition>) {
+        let batch_size = transitions.len();
+        let mut states = Vec::with_capacity(batch_size);
+        let mut actions = Vec::with_capacity(batch_size);
+        let mut rewards = Vec::with_capacity(batch_size);
+        let mut next_states = Vec::with_capacity(batch_size);
+        let mut dones = Vec::with_capacity(batch_size);
+
+        for t in transitions {
+            states.push(t.state);
+            actions.push(t.action);
+            rewards.push(t.reward);
+            next_states.push(t.next_state);
+            dones.push(t.done);
+        }
+
+        self.push_batch(states, actions, rewards, next_states, dones);
+    }
+
+    /// Sample transitions and return as Vec<Transition> (compatibility with CpuRingBuffer API).
+    ///
+    /// Returns `Some(Vec<Transition>)` with `batch_size` randomly sampled transitions.
+    /// Returns `None` if buffer has fewer transitions than requested.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_size` - Number of transitions to sample
+    ///
+    /// # Returns
+    ///
+    /// * `Some(Vec<Transition>)` - Random batch if enough samples available
+    /// * `None` - If `self.size < batch_size`
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use burnme_rly::buffer::{HybridRingBuffer, Transition};
+    ///
+    /// let mut buffer = HybridRingBuffer::<NdArray>::new(10_000, 32);
+    ///
+    /// // Fill buffer
+    /// for i in 0..100 {
+    ///     buffer.push(vec![i as f32; 32], i % 10, i as f32, vec![(i + 1) as f32; 32], false);
+    /// }
+    ///
+    /// // Sample random batch
+    /// if let Some(batch) = buffer.sample(32) {
+    ///     assert_eq!(batch.len(), 32);
+    /// }
+    ///
+    /// // Empty buffer returns None
+    /// let empty = HybridRingBuffer::<NdArray>::new(100, 32);
+    /// assert!(empty.sample(10).is_none());
+    /// ```
+    pub fn sample(&self, batch_size: usize) -> Option<Vec<Transition>> {
+        if self.size < batch_size {
+            return None;
+        }
+
+        let mut rng = rng();
+        let indices: Vec<usize> = (0..batch_size)
+            .map(|_| rng.random_range(0..self.size))
+            .collect();
+
+        Some(
+            indices
+                .iter()
+                .map(|&i| {
+                    Transition::new(
+                        self.states[i].clone(),
+                        self.actions[i],
+                        self.rewards[i],
+                        self.next_states[i].clone(),
+                        self.dones[i],
+                    )
+                })
+                .collect(),
+        )
     }
 
     /// Sample a random batch and convert to GPU tensors.
@@ -1461,246 +1612,6 @@ impl<B: Backend> std::fmt::Debug for GpuRingBuffer<B> {
             .field("write_head", &self.write_head)
             .field("state_dim", &self.state_dim)
             .finish_non_exhaustive()
-    }
-}
-
-/// GPU-native ring buffer for tensor transitions.
-///
-/// # Deprecation Notice
-///
-/// **DEPRECATED**: Use `CpuRingBuffer` + `TensorTransitionBatch::from_transitions()` instead.
-///
-/// ## Why Deprecate?
-///
-/// - `TensorRingBuffer` stores data on GPU, causing memory pressure
-/// - Each `push_transition()` creates batch_size=1 GPU tensors (inefficient)
-/// - `sample()` always returns most recent batch (no random sampling)
-///
-/// ## Migration Path
-///
-/// ```rust,ignore
-/// // OLD (deprecated)
-/// let mut buffer = TensorRingBuffer::new(100_000, 32);
-/// buffer.push_transition(transition, &device);
-/// let batch = buffer.sample(32);
-///
-/// // NEW (recommended)
-/// let mut buffer = CpuRingBuffer::new(100_000);
-/// buffer.push(transition);
-/// if let Some(transitions) = buffer.sample(32) {
-///     let batch = TensorTransitionBatch::from_transitions(&transitions, 32, &device);
-/// }
-/// ```
-#[deprecated(
-    since = "0.2.0",
-    note = "Use CpuRingBuffer + TensorTransitionBatch::from_transitions() instead. \
-            See module documentation for migration guide."
-)]
-#[derive(Debug)]
-pub struct TensorRingBuffer<B: AutodiffBackend> {
-    /// Ring buffer of transitions stored as GPU tensors
-    buffer: VecDeque<TensorTransitionBatch<B>>,
-    /// Maximum capacity (number of batches)
-    capacity: usize,
-    /// Current number of transitions stored
-    num_transitions: usize,
-    /// State dimension
-    state_dim: usize,
-}
-
-#[allow(deprecated)]
-impl<B: AutodiffBackend> TensorRingBuffer<B> {
-    /// Create a new tensor ring buffer
-    ///
-    /// # Arguments
-    /// * `capacity` - Maximum number of transitions to store
-    /// * `state_dim` - Dimension of observation space
-    pub fn new(capacity: usize, state_dim: usize) -> Self {
-        Self {
-            buffer: VecDeque::new(),
-            capacity,
-            num_transitions: 0,
-            state_dim,
-        }
-    }
-
-    /// Get current number of transitions stored
-    pub fn len(&self) -> usize {
-        self.num_transitions
-    }
-
-    /// Check if buffer is empty
-    pub fn is_empty(&self) -> bool {
-        self.num_transitions == 0
-    }
-
-    /// Check if buffer has enough samples for a batch
-    pub fn can_sample(&self, batch_size: usize) -> bool {
-        self.num_transitions >= batch_size
-    }
-
-    /// Push a batch of transitions to the buffer
-    ///
-    /// # Arguments
-    /// * `batch` - Batch of transitions as GPU tensors
-    pub fn push_batch(&mut self, batch: TensorTransitionBatch<B>) {
-        let batch_len = batch.batch_size();
-
-        // If at capacity, remove oldest batch
-        if self.num_transitions + batch_len > self.capacity {
-            if let Some(oldest) = self.buffer.pop_front() {
-                let oldest_len = oldest.batch_size();
-                self.num_transitions -= oldest_len;
-            }
-        }
-
-        self.num_transitions += batch_len;
-        self.buffer.push_back(batch);
-    }
-
-    /// Sample a random batch of transitions
-    ///
-    /// # Arguments
-    /// * `batch_size` - Number of transitions to sample
-    ///
-    /// # Returns
-    /// * `Some(TensorTransitionBatch)` if enough samples available
-    /// * `None` if insufficient samples
-    #[deprecated(
-        since = "0.1.0",
-        note = "Has limited randomness. Use CpuRingBuffer instead."
-    )]
-    pub fn sample(&self, batch_size: usize) -> Option<TensorTransitionBatch<B>> {
-        if self.num_transitions < batch_size || self.buffer.is_empty() {
-            return None;
-        }
-
-        // Randomly select a batch from the buffer
-        let mut rng = rng();
-        let batch_idx = rng.random_range(0..self.buffer.len());
-
-        log::warn!("TensorRingBuffer::sample() has limited randomness. Use CpuRingBuffer instead.");
-
-        self.buffer.get(batch_idx).map(|batch| {
-            let start_idx = 0;
-            TensorTransitionBatch {
-                states: batch
-                    .states
-                    .clone()
-                    .slice(start_idx..(start_idx + batch_size)),
-                actions: batch
-                    .actions
-                    .clone()
-                    .slice(start_idx..(start_idx + batch_size)),
-                rewards: batch
-                    .rewards
-                    .clone()
-                    .slice(start_idx..(start_idx + batch_size)),
-                next_states: batch
-                    .next_states
-                    .clone()
-                    .slice(start_idx..(start_idx + batch_size)),
-                dones: batch
-                    .dones
-                    .clone()
-                    .slice(start_idx..(start_idx + batch_size)),
-            }
-        })
-    }
-
-    /// Clear all transitions from the buffer
-    pub fn clear(&mut self) {
-        self.buffer.clear();
-        self.num_transitions = 0;
-    }
-
-    /// Get state dimension
-    pub fn state_dim(&self) -> usize {
-        self.state_dim
-    }
-
-    /// Get maximum capacity
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    /// Push a single transition to the buffer (converts to batch internally).
-    ///
-    /// # Arguments
-    /// * `transition` - Single transition to store
-    /// * `device` - GPU device for tensor operations
-    pub fn push_transition(&mut self, transition: Transition, device: &B::Device) {
-        let batch = self.transition_to_batch(vec![transition], device);
-        self.push_batch(batch);
-    }
-
-    /// Convert transitions to a tensor batch
-    fn transition_to_batch(
-        &self,
-        transitions: Vec<Transition>,
-        device: &B::Device,
-    ) -> TensorTransitionBatch<B> {
-        use burn::tensor::TensorData;
-
-        let batch_size = transitions.len();
-        let state_dim = self.state_dim;
-
-        // Flatten states and next_states
-        let mut states_flat = Vec::with_capacity(batch_size * state_dim);
-        let mut next_states_flat = Vec::with_capacity(batch_size * state_dim);
-        let mut actions = Vec::with_capacity(batch_size);
-        let mut rewards = Vec::with_capacity(batch_size);
-        let mut dones = Vec::with_capacity(batch_size);
-
-        for t in transitions {
-            // Pad or truncate state to match state_dim
-            let mut state = t.state;
-            state.resize(state_dim, 0.0);
-            state.truncate(state_dim);
-            states_flat.extend(state);
-
-            actions.push(t.action as i32);
-            rewards.push(t.reward);
-            dones.push(if t.done { 1.0f32 } else { 0.0f32 });
-
-            // Pad or truncate next_state to match state_dim
-            let mut next_state = t.next_state;
-            next_state.resize(state_dim, 0.0);
-            next_state.truncate(state_dim);
-            next_states_flat.extend(next_state);
-        }
-
-        // Create tensors on the GPU device using TensorData pattern
-        let states_data = TensorData::new(states_flat, [batch_size, state_dim]);
-        let states: Tensor<B, 2> = Tensor::from_data(states_data.convert::<f32>(), device);
-
-        let actions_data = TensorData::new(actions, [batch_size, 1]);
-        let actions: Tensor<B, 2, Int> = Tensor::from_data(actions_data.convert::<i32>(), device);
-
-        let rewards_data = TensorData::new(rewards, [batch_size, 1]);
-        let rewards: Tensor<B, 2> = Tensor::from_data(rewards_data.convert::<f32>(), device);
-
-        let next_states_data = TensorData::new(next_states_flat, [batch_size, state_dim]);
-        let next_states: Tensor<B, 2> =
-            Tensor::from_data(next_states_data.convert::<f32>(), device);
-
-        let dones_data = TensorData::new(dones, [batch_size, 1]);
-        let dones: Tensor<B, 2> = Tensor::from_data(dones_data.convert::<f32>(), device);
-
-        TensorTransitionBatch {
-            states,
-            actions,
-            rewards,
-            next_states,
-            dones,
-        }
-    }
-}
-
-#[allow(deprecated)]
-impl<B: AutodiffBackend> Default for TensorRingBuffer<B> {
-    fn default() -> Self {
-        Self::new(100_000, 4) // Default: 100k capacity, 4-dim state
     }
 }
 

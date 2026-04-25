@@ -43,6 +43,10 @@ use crate::utils::backend_diagnostics::log_backend_info;
 use burn::tensor::backend::AutodiffBackend;
 use std::error::Error;
 
+/// Default warmup batch size used during initial training phase.
+/// The actual warmup batch size is `min(DEFAULT_WARMUP_BATCH_SIZE, batch_size)`.
+const DEFAULT_WARMUP_BATCH_SIZE: usize = 256;
+
 /// Training metrics returned after completing training.
 /// Re-exported from burnme-rly (superset with best_reward and training_time_secs).
 ///
@@ -261,7 +265,7 @@ impl GpuTrainingCoordinator {
     /// # Returns
     ///
     /// A new coordinator with sensible defaults:
-    /// - warmup_batch_size: min(256, batch_size)
+    /// - warmup_batch_size: min(DEFAULT_WARMUP_BATCH_SIZE, batch_size)
     /// - checkpoint_interval: 10 episodes
     /// - train_frequency: 4 steps
     /// - progress_interval: 1000 steps
@@ -282,7 +286,7 @@ impl GpuTrainingCoordinator {
             episodes,
             max_steps,
             batch_size,
-            warmup_batch_size: 256.min(batch_size),
+            warmup_batch_size: DEFAULT_WARMUP_BATCH_SIZE.min(batch_size),
             checkpoint_interval: 10,
             train_frequency: 4,
             progress_interval: 1000,

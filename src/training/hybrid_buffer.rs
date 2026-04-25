@@ -14,7 +14,8 @@
 use crate::utils::backend_diagnostics::{detect_backend, log_backend_info};
 use crate::utils::timing::OneTimeDiag;
 use burn::tensor::{backend::Backend, Tensor, TensorData};
-use burnme_rly::buffer::TensorTransitionBatch;
+use burnme_rly::buffer::BufferOps;
+use burnme_rly::buffer::{TensorTransitionBatch, Transition};
 use tracing;
 
 /// Hybrid buffer: stores transitions on CPU, converts to GPU only on sampling
@@ -330,6 +331,28 @@ impl<B: Backend> Clone for HybridRingBuffer<B> {
             capacity: self.capacity,
             state_dim: self.state_dim,
             _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+// Implement BufferOps trait for burnme-rly coordinator compatibility
+impl<B: Backend> BufferOps for HybridRingBuffer<B> {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn can_sample(&self, batch_size: usize) -> bool {
+        self.can_sample(batch_size)
+    }
+
+    fn fill_random(&mut self, num_transitions: usize, action_dim: usize, state_dim: usize) {
+        self.fill_random(num_transitions, action_dim, state_dim);
+    }
+
+    fn push_batch(&mut self, transitions: Vec<Transition>) {
+        // Convert burnme_rly::Transition to internal format and push
+        for t in transitions {
+            self.push(t.state, t.action, t.reward, t.next_state, t.done);
         }
     }
 }

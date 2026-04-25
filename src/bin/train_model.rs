@@ -633,14 +633,13 @@ fn run_metis_v2_training<B: burn::tensor::backend::AutodiffBackend>(
     device: B::Device,
     _exploration: eris::policies::ExplorationConfig,
 ) -> Result<(), String> {
-    use burnme_rly::buffer::CpuRingBuffer;
     use burnme_rly::models::{
         composable::SequentialCompose,
         metis_v2::{MetisV2Config, MetisV2Policy},
     };
     use eris::config::{BanditConfig, DQNConfig};
     use eris::env::VecEnv;
-    use eris::models::{BanditAdapter, ContextualBandit, DQNAdapter, QNetwork};
+    use eris::models::{BanditAdapter, DQNAdapter};
 
     println!("=== Training MetisV2 Policy (burnme-rly) ===");
     println!("Episodes: {}", args.episodes);
@@ -708,16 +707,19 @@ fn run_metis_v2_training<B: burn::tensor::backend::AutodiffBackend>(
     // Create MetisV2 config
     let metis_config = MetisV2Config::default()
         .with_bandit_loss_weight(0.5)
-        .with_max_gradient_norm(1.0);
+        .with_max_gradient_norm(1.0)
+        .with_batch_size(args.batch_size)
+        .with_warmup_batch_size(args.warmup_batch_size);
 
     // Create policy
-    let mut policy =
-        MetisV2Policy::<B, _, _>::new(model, metis_config, device.clone(), importance_fn)
-            .map_err(|e| format!("Failed to create MetisV2Policy: {}", e))?;
-
-    // Create buffer
-    let buffer = CpuRingBuffer::new(args.buffer_capacity);
-    policy.buffer = buffer;
+    let mut policy = MetisV2Policy::<B, _, _>::new(
+        model,
+        metis_config,
+        device.clone(),
+        importance_fn,
+        state_dim,
+    )
+    .map_err(|e| format!("Failed to create MetisV2Policy: {}", e))?;
 
     println!("MetisV2 policy initialized!");
     burnme_rly::init_logging();
@@ -1101,9 +1103,9 @@ fn setup_combined_agent<B: burn::tensor::backend::AutodiffBackend>(
     let training_config = TrainingConfig {
         learning_rate: args.learning_rate,
         gamma: 0.99,
-        epsilon_start: 1.0,
-        epsilon_end: 0.01,
-        epsilon_decay: 0.995,
+        epsilon_start: args.epsilon_start,
+        epsilon_end: args.epsilon_end,
+        epsilon_decay: args.epsilon_decay,
         batch_size: args.batch_size,
         buffer_capacity: args.buffer_capacity,
         target_update_freq: 10,
@@ -1111,6 +1113,7 @@ fn setup_combined_agent<B: burn::tensor::backend::AutodiffBackend>(
         backend: "ndarray".to_string(),
         checkpoint_interval: 10,
         max_gradient_norm: 1.0,
+        warmup_batch_size: args.warmup_batch_size,
     };
 
     let agent = CombinedAgent::<B>::new(training_config, model_config, device.clone());
@@ -1271,10 +1274,10 @@ fn run_catcher_training<B: burn::tensor::backend::AutodiffBackend>(
     args: &Args,
     device: B::Device,
 ) -> Result<(), String> {
+    use burnme_rly::coordinator::GpuTrainingCoordinator;
     use eris::env::VecEnv;
     use eris::policies::CatcherPolicy;
-    use eris::training::{GpuTrainable, GpuTrainingCoordinator};
-    use std::path::Path;
+    use eris::training::GpuTrainable;
 
     println!("=== Training Catcher (DDPG) with GpuTrainingCoordinator ===");
     println!("Episodes: {}", args.episodes);
@@ -1322,9 +1325,11 @@ fn run_catcher_training<B: burn::tensor::backend::AutodiffBackend>(
     let mut policy = CatcherPolicy::<B>::with_config(
         device.clone(),
         args.buffer_capacity,
-        state_dim,  // from environment observation space
-        action_dim, // from environment action space
-        100,        // target_update_freq
+        state_dim,              // from environment observation space
+        action_dim,             // from environment action space
+        100,                    // target_update_freq
+        args.batch_size,        // NEW: wire from CLI
+        args.warmup_batch_size, // NEW: wire from CLI
     );
 
     // Validate dimensions match environment
@@ -1345,29 +1350,31 @@ fn run_catcher_training<B: burn::tensor::backend::AutodiffBackend>(
     );
 
     // Create training coordinator with configuration
-    let coordinator = GpuTrainingCoordinator::with_config(
+    let training_config = burnme_rly::coordinator::TrainingConfig::new(
         args.episodes,
         args.max_steps,
         args.batch_size,
-        args.warmup_batch_size,
-        10, // checkpoint_interval
-        4,  // train_frequency
-    );
+    )
+    .with_warmup_batch_size(args.warmup_batch_size)
+    .with_train_frequency(4)
+    .with_checkpoint_interval(10);
+
+    let coordinator = GpuTrainingCoordinator::new(training_config);
 
     println!("\nStarting Catcher training with GpuTrainingCoordinator...");
     println!(
         "Warmup: {} samples → {} samples",
-        coordinator.warmup_batch_size, coordinator.batch_size
+        coordinator.config.warmup_batch_size, coordinator.config.batch_size
     );
     println!(
         "Train frequency: every {} steps after warmup",
-        coordinator.train_frequency
+        coordinator.config.train_frequency
     );
 
     // Run training using coordinator
     let start_time = std::time::Instant::now();
     let metrics = coordinator
-        .run_training::<CatcherPolicy<B>, VecEnv, B>(
+        .run_training::<CatcherPolicy<B>, VecEnv, B, _>(
             &mut policy,
             &mut vec_env,
             &device,
@@ -1409,10 +1416,10 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
     device: B::Device,
     exploration: eris::policies::ExplorationConfig,
 ) -> Result<(), String> {
+    use burnme_rly::coordinator::GpuTrainingCoordinator;
     use eris::env::VecEnv;
     use eris::policies::{DQNExplorerConfig, DQNPolicy};
-    use eris::training::{GpuTrainable, GpuTrainingCoordinator};
-    use std::path::Path;
+    use eris::training::GpuTrainable;
 
     println!("=== Training DQN Policy with VecEnv ===");
     println!("Episodes: {}", args.episodes);
@@ -1498,7 +1505,8 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
         .with_learning_rate(args.learning_rate as f32)
         .with_gamma(0.99)
         .with_batch_size(args.batch_size)
-        .with_buffer_capacity(effective_buffer_capacity);
+        .with_buffer_capacity(effective_buffer_capacity)
+        .with_warmup_batch_size(args.warmup_batch_size);
 
     // Create DQN policy
     let mut policy = DQNPolicy::<B>::new(dqn_explorer_config, device.clone());
@@ -1515,29 +1523,31 @@ fn run_dqn_training<B: burn::tensor::backend::AutodiffBackend>(
     log_backend_info::<B>("run_dqn_training", &device);
 
     // Create training coordinator with configuration
-    let coordinator = GpuTrainingCoordinator::with_config(
+    let training_config = burnme_rly::coordinator::TrainingConfig::new(
         args.episodes,
         args.max_steps,
         args.batch_size,
-        args.warmup_batch_size,
-        10, // checkpoint_interval
-        4,  // train_frequency
-    );
+    )
+    .with_warmup_batch_size(args.warmup_batch_size)
+    .with_train_frequency(4)
+    .with_checkpoint_interval(10);
+
+    let coordinator = GpuTrainingCoordinator::new(training_config);
 
     println!("\nStarting training with GpuTrainingCoordinator...");
     println!(
         "Warmup: {} samples → {} samples",
-        coordinator.warmup_batch_size, coordinator.batch_size
+        coordinator.config.warmup_batch_size, coordinator.config.batch_size
     );
     println!(
         "Train frequency: every {} steps after warmup",
-        coordinator.train_frequency
+        coordinator.config.train_frequency
     );
 
     // Run training using coordinator (like Metis)
     let start_time = std::time::Instant::now();
     let metrics = coordinator
-        .run_training::<DQNPolicy<B>, VecEnv, B>(
+        .run_training::<DQNPolicy<B>, VecEnv, B, _>(
             &mut policy,
             &mut vec_env,
             &device,

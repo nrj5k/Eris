@@ -115,6 +115,7 @@ pub mod rl;
 pub mod space;
 pub mod tier;
 pub mod trace;
+pub mod trainers;
 pub mod training;
 pub mod utils;
 

@@ -1,7 +1,7 @@
 //! GPU training coordinator extracted from Metis VecEnv pattern
 
 use crate::{
-    buffer::Transition,
+    buffer::{BufferOps, Transition},
     traits::{BatchedActionSelector, GpuTrainable, VecEnvironment},
     warmup,
 };
@@ -164,7 +164,7 @@ impl GpuTrainingCoordinator {
     ///
     /// # Returns
     /// Training metrics on success
-    pub fn run_training<A, E, B>(
+    pub fn run_training<A, E, B, Buf>(
         &self,
         agent: &mut A,
         env: &mut E,
@@ -172,9 +172,10 @@ impl GpuTrainingCoordinator {
         checkpoint_prefix: &str,
     ) -> Result<TrainingMetrics, Box<dyn Error>>
     where
-        A: GpuTrainable<B> + BatchedActionSelector<B>,
+        A: GpuTrainable<B, Buf> + BatchedActionSelector<B>,
         E: VecEnvironment,
         B: AutodiffBackend,
+        Buf: BufferOps,
     {
         // Validate config first
         self.config.validate().map_err(|e| {
@@ -382,7 +383,7 @@ impl GpuTrainingCoordinator {
     ///
     /// # Returns
     /// Training metrics with timing information populated.
-    pub fn run_training_timed<A, E, B>(
+    pub fn run_training_timed<A, E, B, Buf>(
         &self,
         agent: &mut A,
         env: &mut E,
@@ -390,9 +391,10 @@ impl GpuTrainingCoordinator {
         checkpoint_prefix: &str,
     ) -> Result<TrainingMetrics, Box<dyn Error>>
     where
-        A: GpuTrainable<B> + BatchedActionSelector<B>,
+        A: GpuTrainable<B, Buf> + BatchedActionSelector<B>,
         E: VecEnvironment,
         B: AutodiffBackend,
+        Buf: BufferOps,
     {
         let start = std::time::Instant::now();
         let mut metrics = self.run_training(agent, env, device, checkpoint_prefix)?;
@@ -568,7 +570,7 @@ mod integration_tests {
         }
     }
 
-    impl GpuTrainable<TestBackend> for ToyAgent {
+    impl GpuTrainable<TestBackend, CpuRingBuffer> for ToyAgent {
         fn buffer_mut(&mut self) -> &mut CpuRingBuffer {
             &mut self.buffer
         }

@@ -443,7 +443,7 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
         self.decay_epsilon();
 
         // 12. Accumulate loss on GPU (async - Metis optimization)
-        self.loss_accumulator.accumulate(loss);
+        self.loss_accumulator.accumulate(loss.detach());
 
         // 13. Try to sync accumulated loss
         self.loss_accumulator.try_sync()

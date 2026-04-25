@@ -10,7 +10,7 @@ use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Distribution, Int, Tensor, TensorData};
 
-use crate::buffer::{CpuRingBuffer, TensorTransitionBatch};
+use crate::buffer::{HybridRingBuffer, TensorTransitionBatch};
 use crate::models::composable::SequentialCompose;
 use crate::models::ComposableModel;
 use crate::traits::{BatchedActionSelector, GpuTrainable};
@@ -66,9 +66,9 @@ impl Default for MetisV2Config {
             epsilon_start: 1.0,
             epsilon_end: 0.01,
             epsilon_decay: 0.995,
-            batch_size: 32,
+            batch_size: 2048,
             warmup_batch_size: 256,
-            buffer_capacity: 10000,
+            buffer_capacity: 100000,
             target_update_freq: 100,
             loss_sync_freq: 500,
         }
@@ -104,6 +104,18 @@ impl MetisV2Config {
         self.max_gradient_norm = norm;
         self
     }
+
+    /// Builder pattern: with_warmup_batch_size
+    pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
+        self.warmup_batch_size = size;
+        self
+    }
+
+    /// Builder pattern: with_batch_size
+    pub fn with_batch_size(mut self, size: usize) -> Self {
+        self.batch_size = size;
+        self
+    }
 }
 
 /// MetisV2 Policy: Joint Bandit + DQN training
@@ -130,7 +142,7 @@ where
     pub optimizer: OptimizerAdaptor<Adam, SequentialCompose<B, A, M>, B>,
 
     /// Replay buffer for experience replay
-    pub buffer: CpuRingBuffer,
+    pub buffer: HybridRingBuffer<B>,
 
     /// Configuration
     pub config: MetisV2Config,
@@ -156,6 +168,9 @@ where
     /// Closure to compute importance from bandit output
     /// Takes features tensor, returns importance scores
     importance_fn: Box<dyn Fn(Tensor<B, 2>) -> Tensor<B, 2>>,
+
+    /// State dimension for the environment
+    state_dim: usize,
 }
 
 impl<B, A, M> MetisV2Policy<B, A, M>
@@ -182,6 +197,7 @@ where
         config: MetisV2Config,
         device: B::Device,
         importance_fn: Box<dyn Fn(Tensor<B, 2>) -> Tensor<B, 2>>,
+        state_dim: usize,
     ) -> Result<Self, String> {
         config.validate()?;
 
@@ -193,7 +209,7 @@ where
             .with_grad_clipping(Some(GradientClippingConfig::Norm(config.max_gradient_norm)))
             .init();
 
-        let buffer = CpuRingBuffer::new(config.buffer_capacity);
+        let buffer = HybridRingBuffer::<B>::new(config.buffer_capacity, state_dim);
         let accumulated_loss = Tensor::<B, 1>::zeros([1], &device);
 
         let epsilon = config.epsilon_start;
@@ -210,6 +226,7 @@ where
             accumulated_loss,
             accumulated_count: 0,
             importance_fn,
+            state_dim,
         })
     }
 
@@ -243,15 +260,13 @@ where
     /// State dimension (from model input)
     #[allow(dead_code)]
     fn state_dim(&self) -> usize {
-        // This is a placeholder - in practice we'd need to track this
-        // For now, return a reasonable default or extract from model
-        32
+        self.state_dim
     }
 
     /// Compute joint training step with DQN + Bandit loss
     ///
     /// Joint loss = dqn_loss + bandit_loss_weight * bandit_loss
-    pub fn train_step_gpu(&mut self, batch: &TensorTransitionBatch<B>) -> f32 {
+    pub fn train_step_gpu_impl(&mut self, batch: &TensorTransitionBatch<B>) -> f32 {
         let batch_size = batch.states.shape().dims[0];
 
         // 1. Forward through model_a (bandit) for features
@@ -312,17 +327,13 @@ where
             self.optimizer
                 .step(self.config.learning_rate, self.model.clone(), grads_params);
 
-        // 11. Update counters
-        self.step_count += 1;
-        self.decay_exploration();
-        self.maybe_update_target();
-
+        // 11. Check warmup completion
         if !self.warmup_complete && self.buffer.len() >= self.config.batch_size {
             self.warmup_complete = true;
         }
 
         // 12. Async loss accumulation
-        self.accumulated_loss = self.accumulated_loss.clone() + joint_loss;
+        self.accumulated_loss = self.accumulated_loss.clone() + joint_loss.detach();
         self.accumulated_count += 1;
 
         if self
@@ -330,7 +341,12 @@ where
             .is_multiple_of(self.config.loss_sync_freq)
         {
             let avg_loss = self.accumulated_loss.clone() / self.accumulated_count as f32;
-            let loss_scalar: f32 = avg_loss.into_data().convert::<f32>().as_slice().unwrap()[0];
+            let loss_scalar: f32 = avg_loss
+                .detach()
+                .into_data()
+                .convert::<f32>()
+                .as_slice()
+                .unwrap()[0];
             self.accumulated_loss = Tensor::<B, 1>::zeros([1], &self.device);
             self.accumulated_count = 0;
             loss_scalar
@@ -353,7 +369,7 @@ where
 // GpuTrainable Trait Implementation
 // ============================================================================
 
-impl<B, A, M> GpuTrainable<B> for MetisV2Policy<B, A, M>
+impl<B, A, M> GpuTrainable<B, HybridRingBuffer<B>> for MetisV2Policy<B, A, M>
 where
     B: AutodiffBackend,
     A: crate::models::ComposableModel<B>
@@ -371,17 +387,17 @@ where
     A::InnerModule: ComposableModel<B::InnerBackend>,
     M::InnerModule: ComposableModel<B::InnerBackend>,
 {
-    fn buffer_mut(&mut self) -> &mut CpuRingBuffer {
+    fn buffer_mut(&mut self) -> &mut HybridRingBuffer<B> {
         &mut self.buffer
     }
 
-    fn buffer(&self) -> &CpuRingBuffer {
+    fn buffer(&self) -> &HybridRingBuffer<B> {
         &self.buffer
     }
 
     fn train_step_gpu(&mut self, batch: &TensorTransitionBatch<B>) -> f32 {
-        // Call the existing train_step_gpu method
-        self.train_step_gpu(batch)
+        // Call the inherent train_step_gpu_impl method
+        self.train_step_gpu_impl(batch)
     }
 
     fn train_step_gpu_native(
@@ -389,10 +405,9 @@ where
         _steps_since_last_train: usize,
         device: &B::Device,
     ) -> Option<f32> {
-        // Sample batch and train
+        // Sample batch and train (GPU-native path)
         let batch_size = self.effective_batch_size();
-        let transitions = self.buffer.sample(batch_size)?;
-        let batch = TensorTransitionBatch::from_transitions(&transitions, batch_size, device);
+        let batch = self.buffer.sample_batch(batch_size, device)?;
         let loss = self.train_step_gpu(&batch);
         Some(loss)
     }
@@ -442,9 +457,7 @@ where
     }
 
     fn state_dim(&self) -> usize {
-        // Extract from model or use a reasonable default
-        // For MetisV2, this would typically come from the bandit model's input dim
-        32
+        self.state_dim
     }
 
     fn buffer_len(&self) -> usize {

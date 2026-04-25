@@ -78,6 +78,8 @@ pub struct MetisConfig {
     pub bandit_loss_weight: f32,
     /// Maximum gradient norm for gradient clipping (default: 1.0)
     pub max_gradient_norm: f32,
+    /// Warmup batch size (smaller batch during warmup)
+    pub warmup_batch_size: usize,
 }
 
 impl Default for MetisConfig {
@@ -101,7 +103,16 @@ impl Default for MetisConfig {
             },
             bandit_loss_weight: 0.5,
             max_gradient_norm: 1.0,
+            warmup_batch_size: 256,
         }
+    }
+}
+
+impl MetisConfig {
+    /// Set warmup batch size
+    pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
+        self.warmup_batch_size = size;
+        self
     }
 }
 
@@ -143,7 +154,7 @@ impl<B: AutodiffBackend> MetisPolicy<B> {
             device: device.clone(),
             step_count: 0,
             gpu_buffer: HybridRingBuffer::new(config.buffer_capacity, config.state_dim),
-            warmup_batch_size: 256.min(config.batch_size),
+            warmup_batch_size: config.warmup_batch_size.min(config.batch_size),
             full_batch_size: config.batch_size,
             warmup_complete: false,
         }

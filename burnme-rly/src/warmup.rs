@@ -3,6 +3,7 @@
 //! This module provides utility functions for managing warmup phases
 //! and training frequency in GPU-native reinforcement learning training.
 
+use crate::buffer::BufferOps;
 use crate::traits::GpuTrainable;
 use burn::tensor::backend::AutodiffBackend;
 
@@ -70,8 +71,8 @@ pub fn should_train(
 ///     total_loss += loss;
 /// }
 /// ```
-pub fn train_step_with_warmup<B: AutodiffBackend>(
-    agent: &mut impl GpuTrainable<B>,
+pub fn train_step_with_warmup<B: AutodiffBackend, Buf: BufferOps>(
+    agent: &mut impl GpuTrainable<B, Buf>,
     steps_since_last_train: usize,
     device: &B::Device,
 ) -> Option<f32> {
@@ -112,8 +113,8 @@ pub fn train_step_with_warmup<B: AutodiffBackend>(
 /// # Returns
 /// * `Some(loss)` if training occurred
 /// * `None` if training was skipped (insufficient samples, frequency not met)
-pub fn train_step_with_warmup_config<B: AutodiffBackend>(
-    agent: &mut impl GpuTrainable<B>,
+pub fn train_step_with_warmup_config<B: AutodiffBackend, Buf: BufferOps>(
+    agent: &mut impl GpuTrainable<B, Buf>,
     full_batch_size: usize,
     warmup_batch_size: usize,
     steps_since_last_train: usize,

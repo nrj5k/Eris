@@ -178,7 +178,7 @@ use crate::models::QNetwork;
 use crate::training::HybridRingBuffer;
 use crate::utils::backend_diagnostics::log_backend_info;
 use crate::utils::timing::{log_step_timing, OneTimeDiag};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
+use burn::optim::{adaptor::OptimizerAdaptor, Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor};
 use burnme_rly::buffer::TensorTransitionBatch;
@@ -203,6 +203,8 @@ pub struct DQNExplorerConfig {
     pub batch_size: usize,
     /// Replay buffer capacity
     pub buffer_capacity: usize,
+    /// Warmup batch size (starts small, ramps up to full batch)
+    pub warmup_batch_size: usize,
 }
 
 impl DQNExplorerConfig {
@@ -216,6 +218,7 @@ impl DQNExplorerConfig {
             target_update_freq: 1000,
             batch_size: 2048, // Optimized for GPU utilization (multiple of 32 for warp alignment)
             buffer_capacity: 10_000,
+            warmup_batch_size: 256,
         }
     }
 
@@ -246,6 +249,12 @@ impl DQNExplorerConfig {
     /// Set buffer capacity
     pub fn with_buffer_capacity(mut self, capacity: usize) -> Self {
         self.buffer_capacity = capacity;
+        self
+    }
+
+    /// Set warmup batch size
+    pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
+        self.warmup_batch_size = size;
         self
     }
 }
@@ -299,8 +308,8 @@ pub struct DQNPolicy<B: AutodiffBackend> {
     /// Warmup configuration
     pub warmup_batch_size: usize,
     pub warmup_complete: bool,
-    /// Optimizer configuration for training
-    optimizer_config: AdamConfig,
+    /// Optimizer for training (cached to prevent VRAM leak)
+    optimizer: OptimizerAdaptor<Adam, QNetwork<B>, B>,
 }
 
 impl<B: AutodiffBackend> DQNPolicy<B> {
@@ -348,11 +357,11 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
         let action_dim = config.dqn_config.action_dim;
         let explorer = config.exploration.clone().build(action_dim);
 
-        // Warmup batch size: start with 256 samples (or full batch if smaller)
-        let warmup_batch_size = 256.min(config.batch_size);
+        // Warmup batch size: start with configured value (or full batch if smaller)
+        let warmup_batch_size = config.warmup_batch_size.min(config.batch_size);
 
-        // Initialize optimizer configuration
-        let optimizer_config = AdamConfig::new();
+        // Initialize optimizer (cached once to prevent VRAM leak)
+        let optimizer = AdamConfig::new().init();
 
         Self {
             q_network,
@@ -364,7 +373,7 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
             step_count: 0,
             warmup_batch_size,
             warmup_complete: false,
-            optimizer_config,
+            optimizer,
         }
     }
 
@@ -442,10 +451,9 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
         tracing::debug!("backward() COMPLETE, got gradients");
         let grads_params = GradientsParams::from_grads(grads, &self.q_network);
 
-        // Update Q-network with optimizer
+        // Update Q-network with cached optimizer (no VRAM leak)
         tracing::debug!("Calling optimizer.step()");
-        let mut optimizer = self.optimizer_config.init();
-        self.q_network = optimizer.step(
+        self.q_network = self.optimizer.step(
             self.config.learning_rate as f64,
             self.q_network.clone(),
             grads_params,
@@ -453,7 +461,12 @@ impl<B: AutodiffBackend> DQNPolicy<B> {
         tracing::debug!("optimizer.step() COMPLETE");
 
         // Extract scalar loss value
-        let loss_data = loss.into_data().convert::<f32>().as_slice().unwrap()[0];
+        let loss_data = loss
+            .detach()
+            .into_data()
+            .convert::<f32>()
+            .as_slice()
+            .unwrap()[0];
         tracing::debug!("train_dqn_step EXIT, loss: {:.4}", loss_data);
         loss_data
     }
@@ -766,6 +779,124 @@ impl<B: AutodiffBackend> crate::training::GpuTrainable<B> for DQNPolicy<B> {
         self.maybe_update_target(self.step_count());
         self.update_epsilon();
         Some(loss)
+    }
+}
+
+// ============================================================================
+// burnme_rly::traits::GpuTrainable Implementation
+// ============================================================================
+
+impl<B: AutodiffBackend> burnme_rly::traits::GpuTrainable<B, HybridRingBuffer<B>> for DQNPolicy<B> {
+    fn buffer_mut(&mut self) -> &mut HybridRingBuffer<B> {
+        &mut self.gpu_buffer
+    }
+
+    fn buffer(&self) -> &HybridRingBuffer<B> {
+        &self.gpu_buffer
+    }
+
+    fn train_step_gpu_native(
+        &mut self,
+        _steps_since_last_train: usize,
+        device: &B::Device,
+    ) -> Option<f32> {
+        use burnme_rly::traits::GpuTrainableExt;
+
+        let batch_size = self.effective_batch_size();
+
+        // Sample from buffer (returns TensorTransitionBatch directly)
+        let batch = self.gpu_buffer.sample_batch(batch_size, device)?;
+
+        // Train on batch
+        let loss = self.train_step_gpu(&batch);
+        Some(loss)
+    }
+
+    fn train_step_gpu(&mut self, batch: &TensorTransitionBatch<B>) -> f32 {
+        // Reuse existing train_dqn_step logic but with burnme-rly batch type
+        // The batch has: states, actions, rewards, next_states, dones
+        let batch_size = batch.states.dims()[0];
+        let actions_2d = batch.actions.clone().reshape([batch_size, 1]);
+        let rewards_2d = batch.rewards.clone().reshape([batch_size, 1]);
+        let dones_2d = batch.dones.clone().reshape([batch_size, 1]);
+
+        self.train_dqn_step(
+            &batch.states,
+            &actions_2d,
+            &rewards_2d,
+            &batch.next_states,
+            &dones_2d,
+        )
+    }
+
+    fn device(&self) -> &B::Device {
+        &self.device
+    }
+
+    fn state_dim(&self) -> usize {
+        self.config.dqn_config.input_dim
+    }
+
+    fn buffer_len(&self) -> usize {
+        self.gpu_buffer.len()
+    }
+
+    fn warmup_batch_size(&self) -> usize {
+        self.warmup_batch_size
+    }
+
+    fn is_warmup_complete(&self) -> bool {
+        self.warmup_complete
+    }
+
+    fn set_warmup_complete(&mut self, complete: bool) {
+        self.warmup_complete = complete;
+    }
+
+    fn epsilon(&self) -> f32 {
+        self.get_exploration_param()
+    }
+
+    fn step_count(&self) -> usize {
+        self.step_count
+    }
+
+    fn increment_step_count(&mut self) {
+        self.step_count += 1;
+    }
+
+    fn batch_size(&self) -> usize {
+        self.config.batch_size
+    }
+
+    fn target_update_freq(&self) -> usize {
+        self.config.target_update_freq
+    }
+
+    fn learning_rate(&self) -> f32 {
+        self.config.learning_rate
+    }
+
+    fn gamma(&self) -> f32 {
+        self.config.gamma
+    }
+
+    fn decay_exploration(&mut self) {
+        self.decay_exploration();
+    }
+
+    fn update_target_network(&mut self) {
+        self.update_target_network();
+    }
+
+    fn save_checkpoint(&self, _path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // TODO: Implement checkpoint saving using burnme-rly checkpoint utilities
+        Err("Checkpoint saving not yet implemented for DQNPolicy".into())
+    }
+
+    fn load_checkpoint(&mut self, _path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // TODO: Implement checkpoint loading using burnme-rly checkpoint utilities
+        Err("Checkpoint loading not yet implemented for DQNPolicy".into())
     }
 }
 

@@ -1,3 +1,101 @@
+/// Base configuration struct shared by all RL trainers
+#[derive(Debug, Clone)]
+pub struct TrainerConfigBase {
+    pub gamma: f32,
+    pub epsilon_start: f32,
+    pub epsilon_end: f32,
+    pub epsilon_decay: f32,
+    pub learning_rate: f64,
+    pub batch_size: usize,
+    pub buffer_capacity: usize,
+    pub target_update_freq: usize,
+    pub max_gradient_norm: f32,
+    pub loss_sync_freq: usize,
+    pub warmup_steps: usize,
+    pub warmup_batch_size: usize,
+}
+
+impl Default for TrainerConfigBase {
+    fn default() -> Self {
+        Self {
+            gamma: 0.99,
+            epsilon_start: 1.0,
+            epsilon_end: 0.01,
+            epsilon_decay: 0.995,
+            learning_rate: 0.0001,
+            batch_size: 2048,
+            buffer_capacity: 100_000,
+            target_update_freq: 1000,
+            max_gradient_norm: 1.0,
+            loss_sync_freq: 500,
+            warmup_steps: 1000,
+            warmup_batch_size: 256,
+        }
+    }
+}
+
+impl TrainerConfigBase {
+    pub fn with_gamma(mut self, gamma: f32) -> Self {
+        self.gamma = gamma;
+        self
+    }
+
+    pub fn with_epsilon_start(mut self, epsilon: f32) -> Self {
+        self.epsilon_start = epsilon;
+        self
+    }
+
+    pub fn with_epsilon_end(mut self, epsilon: f32) -> Self {
+        self.epsilon_end = epsilon;
+        self
+    }
+
+    pub fn with_epsilon_decay(mut self, decay: f32) -> Self {
+        self.epsilon_decay = decay;
+        self
+    }
+
+    pub fn with_learning_rate(mut self, lr: f64) -> Self {
+        self.learning_rate = lr;
+        self
+    }
+
+    pub fn with_batch_size(mut self, size: usize) -> Self {
+        self.batch_size = size;
+        self
+    }
+
+    pub fn with_buffer_capacity(mut self, cap: usize) -> Self {
+        self.buffer_capacity = cap;
+        self
+    }
+
+    pub fn with_target_update_freq(mut self, freq: usize) -> Self {
+        self.target_update_freq = freq;
+        self
+    }
+
+    pub fn with_max_gradient_norm(mut self, norm: f32) -> Self {
+        self.max_gradient_norm = norm;
+        self
+    }
+
+    pub fn with_loss_sync_freq(mut self, freq: usize) -> Self {
+        self.loss_sync_freq = freq;
+        self
+    }
+
+    pub fn with_warmup_steps(mut self, steps: usize) -> Self {
+        self.warmup_steps = steps;
+        self
+    }
+
+    pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
+        self.warmup_batch_size = size;
+        self
+    }
+}
+
 /// Shared configuration trait for all RL trainers
 pub trait TrainerConfig: Clone {
     /// Discount factor for TD target
@@ -123,6 +221,18 @@ pub trait TrainerConfig: Clone {
             return Err(format!("max_gradient_norm must be > 0, got {}", max_grad));
         }
 
+        // Target update frequency must be positive
+        let target_freq = self.target_update_freq();
+        if target_freq == 0 {
+            return Err("target_update_freq must be > 0".to_string());
+        }
+
+        // Warmup batch size must be positive
+        let warmup_bs = self.warmup_batch_size();
+        if warmup_bs == 0 {
+            return Err("warmup_batch_size must be > 0".to_string());
+        }
+
         // Warn about non-warp-aligned batch size
         if !self.is_batch_size_warp_aligned() {
             log::warn!(
@@ -135,5 +245,55 @@ pub trait TrainerConfig: Clone {
         }
 
         Ok(())
+    }
+}
+
+impl TrainerConfig for TrainerConfigBase {
+    fn gamma(&self) -> f32 {
+        self.gamma
+    }
+
+    fn epsilon_start(&self) -> f32 {
+        self.epsilon_start
+    }
+
+    fn epsilon_end(&self) -> f32 {
+        self.epsilon_end
+    }
+
+    fn epsilon_decay(&self) -> f32 {
+        self.epsilon_decay
+    }
+
+    fn learning_rate(&self) -> f64 {
+        self.learning_rate
+    }
+
+    fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    fn buffer_capacity(&self) -> usize {
+        self.buffer_capacity
+    }
+
+    fn target_update_freq(&self) -> usize {
+        self.target_update_freq
+    }
+
+    fn max_gradient_norm(&self) -> f32 {
+        self.max_gradient_norm
+    }
+
+    fn loss_sync_freq(&self) -> usize {
+        self.loss_sync_freq
+    }
+
+    fn warmup_steps(&self) -> usize {
+        self.warmup_steps
+    }
+
+    fn warmup_batch_size(&self) -> usize {
+        self.warmup_batch_size
     }
 }

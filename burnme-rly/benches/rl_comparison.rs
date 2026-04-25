@@ -13,10 +13,10 @@ use burn::module::Module;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::backend::AutodiffBackend;
 use burnme_rly::{
-    DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig, PpoTrainer, PpoTrainerConfig,
     buffer::Transition,
     models::{CombinedModel, CombinedModelConfig},
     trainers::dqn_trainer::QNetwork,
+    DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig, PpoTrainer, PpoTrainerConfig,
 };
 use rand::RngExt;
 use std::time::Instant;
@@ -35,14 +35,14 @@ impl<B: burn::tensor::backend::Backend> SimpleQNetwork<B> {
         let mut layers = Vec::new();
         let mut prev_dim = state_dim;
         let hidden_dims = vec![64, 64];
-        
+
         for &h in &hidden_dims {
             layers.push(LinearConfig::new(prev_dim, h).init(device));
             prev_dim = h;
         }
-        
+
         let output = LinearConfig::new(prev_dim, action_dim).init(device);
-        
+
         Self { layers, output }
     }
 }
@@ -114,7 +114,10 @@ fn benchmark_algorithm(
         f32::NAN
     };
 
-    println!("  {} - Avg loss: {:.4}, Time: {:.2}s", name, avg_loss, elapsed);
+    println!(
+        "  {} - Avg loss: {:.4}, Time: {:.2}s",
+        name, avg_loss, elapsed
+    );
     (avg_loss, elapsed)
 }
 
@@ -147,11 +150,15 @@ fn main() {
             .with_batch_size(batch_size)
             .with_buffer_capacity(10000)
             .with_loss_sync_freq(500);
-        
+
         let q_network = SimpleQNetwork::<TestBackend>::new(state_dim, action_dim, device);
         let mut trainer = DQNTrainer::<TestBackend, SimpleQNetwork<TestBackend>>::new(
-            q_network, state_dim, config, device.clone()
-        ).expect("Failed to create DQN trainer");
+            q_network,
+            state_dim,
+            config,
+            device.clone(),
+        )
+        .expect("Failed to create DQN trainer");
 
         // Fill buffer - convert transitions to GPU tensors
         use burn::tensor::Tensor;
@@ -166,12 +173,17 @@ fn main() {
                 burn::tensor::TensorData::new(next_state_data, [1, state_dim]).convert::<f32>(),
                 device,
             );
-            trainer.buffer.push(&state_tensor, t.action, t.reward, &next_state_tensor, t.done);
+            trainer.buffer.push(
+                &state_tensor,
+                t.action,
+                t.reward,
+                &next_state_tensor,
+                t.done,
+            );
         }
 
-        let (avg_loss, time) = benchmark_algorithm("DQN", || {
-            trainer.train_step()
-        }, training_iterations);
+        let (avg_loss, time) =
+            benchmark_algorithm("DQN", || trainer.train_step(), training_iterations);
 
         results.push(("DQN (Cold-RL style)", avg_loss, time));
         println!("  ✓ Complete\n");
@@ -183,19 +195,18 @@ fn main() {
         let config = PpoTrainerConfig::default()
             .with_batch_size(batch_size)
             .with_buffer_capacity(10000);
-        
-        let mut trainer = PpoTrainer::<TestBackend>::new(
-            state_dim, action_dim, config, device.clone()
-        ).expect("Failed to create PPO trainer");
+
+        let mut trainer =
+            PpoTrainer::<TestBackend>::new(state_dim, action_dim, config, device.clone())
+                .expect("Failed to create PPO trainer");
 
         // Fill buffer (PPO uses CpuRingBuffer)
         for t in &transitions {
             trainer.buffer.push(t.clone());
         }
 
-        let (avg_loss, time) = benchmark_algorithm("PPO", || {
-            trainer.train_step()
-        }, training_iterations);
+        let (avg_loss, time) =
+            benchmark_algorithm("PPO", || trainer.train_step(), training_iterations);
 
         results.push(("PPO", avg_loss, time));
         println!("  ✓ Complete\n");
@@ -207,7 +218,7 @@ fn main() {
         let config = MetisTrainerConfig::default()
             .with_batch_size(batch_size)
             .with_buffer_capacity(10000);
-        
+
         let model_config = CombinedModelConfig::new(
             state_dim,
             vec![64], // bandit hidden
@@ -216,10 +227,10 @@ fn main() {
             action_dim,
         );
         let model = CombinedModel::<TestBackend>::new(model_config, device);
-        
-        let mut trainer = MetisTrainer::<TestBackend>::new(
-            model, state_dim, config, device.clone()
-        ).expect("Failed to create Metis trainer");
+
+        let mut trainer =
+            MetisTrainer::<TestBackend>::new(model, state_dim, config, device.clone())
+                .expect("Failed to create Metis trainer");
 
         // Fill buffer - convert transitions to GPU tensors
         use burn::tensor::Tensor;
@@ -234,12 +245,17 @@ fn main() {
                 burn::tensor::TensorData::new(next_state_data, [1, state_dim]).convert::<f32>(),
                 device,
             );
-            trainer.buffer.push(&state_tensor, t.action, t.reward, &next_state_tensor, t.done);
+            trainer.buffer.push(
+                &state_tensor,
+                t.action,
+                t.reward,
+                &next_state_tensor,
+                t.done,
+            );
         }
 
-        let (avg_loss, time) = benchmark_algorithm("Metis", || {
-            trainer.train_step()
-        }, training_iterations);
+        let (avg_loss, time) =
+            benchmark_algorithm("Metis", || trainer.train_step(), training_iterations);
 
         results.push(("Metis (DQN + Bandit)", avg_loss, time));
         println!("  ✓ Complete\n");
@@ -249,7 +265,10 @@ fn main() {
     println!("\n========================================");
     println!("  Results Summary");
     println!("========================================");
-    println!("{:<25} | {:>12} | {:>10}", "Algorithm", "Avg Loss", "Time (s)");
+    println!(
+        "{:<25} | {:>12} | {:>10}",
+        "Algorithm", "Avg Loss", "Time (s)"
+    );
     println!("{}", "-".repeat(55));
 
     for (name, loss, time) in &results {

@@ -5,8 +5,8 @@
 mod integration_tests {
     use burnme_rly::{
         should_train, train_step_with_warmup, BatchedActionSelector, DiscreteSpace, GpuTrainable,
-        GpuTrainingCoordinator, Info, StepResult, TensorRingBuffer, TensorTransitionBatch,
-        TrainingConfig, TrainingMetrics, Transition, VecEnvironment,
+        GpuTrainingCoordinator, Info, StepResult, TensorTransitionBatch, TrainingConfig,
+        TrainingMetrics, Transition, VecEnvironment,
     };
 
     #[test]

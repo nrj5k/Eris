@@ -248,15 +248,27 @@ pub fn compute_double_dqn_loss<B: AutodiffBackend>(
     dones: &Tensor<B, 2>,
     gamma: f32,
 ) -> Tensor<B, 1> {
-    burnme_rly::compute_double_dqn_loss_rank2(
-        q_values,
-        next_q_policy,
-        next_q_target,
-        actions,
-        rewards,
-        dones,
-        gamma,
-    )
+    let device = q_values.device();
+    let batch_size = rewards.shape().dims[0];
+
+    // Gather Q-values for taken actions
+    let current_q = q_values.gather(1, actions.clone());
+
+    // Policy selects best actions
+    let best_actions = next_q_policy.argmax(1);
+
+    // Target evaluates selected actions
+    let max_next_q = next_q_target.gather(1, best_actions);
+
+    // TD target
+    let target_q = rewards.clone()
+        + Tensor::full([batch_size, 1], gamma, &device)
+            * max_next_q
+            * (Tensor::ones_like(dones) - dones.clone());
+
+    // MSE loss
+    let diff = current_q - target_q.detach();
+    diff.powf_scalar(2.0).mean()
 }
 
 #[cfg(test)]

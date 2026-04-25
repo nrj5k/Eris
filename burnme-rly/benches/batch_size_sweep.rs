@@ -102,14 +102,13 @@ fn benchmark_batch_size(batch_size: usize) -> f64 {
         .with_buffer_capacity(buffer_capacity)
         .with_loss_sync_freq(1); // Sync every step for accurate timing
 
-    let mut trainer =
-        DQNTrainer::<TestBackend, BenchmarkQNetwork<TestBackend>>::new(
-            q_network,
-            state_dim,
-            config,
-            device.clone(),
-        )
-        .expect("Failed to create trainer");
+    let mut trainer = DQNTrainer::<TestBackend, BenchmarkQNetwork<TestBackend>>::new(
+        q_network,
+        state_dim,
+        config,
+        device.clone(),
+    )
+    .expect("Failed to create trainer");
 
     // Fill buffer with test data
     let transitions = create_test_transitions(buffer_capacity, state_dim, action_dim);
@@ -163,7 +162,10 @@ fn main() {
     let mut results = Vec::new();
 
     println!("Testing batch sizes: {:?}\n", batch_sizes);
-    println!("{:<12} | {:>12} | {:>15}", "Batch Size", "ms/step", "Status");
+    println!(
+        "{:<12} | {:>12} | {:>15}",
+        "Batch Size", "ms/step", "Status"
+    );
     println!("{}", "-".repeat(45));
 
     for &batch_size in &batch_sizes {

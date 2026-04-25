@@ -359,7 +359,7 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
         self.epsilon = (self.epsilon * self.config.epsilon_decay).max(self.config.epsilon_end);
 
         // 14. Accumulate loss on GPU (no sync!)
-        self.accumulated_loss = self.accumulated_loss.clone() + joint_loss.clone();
+        self.accumulated_loss = self.accumulated_loss.clone() + joint_loss.detach();
         self.accumulated_count += 1;
 
         // 15. Only sync every loss_sync_freq steps

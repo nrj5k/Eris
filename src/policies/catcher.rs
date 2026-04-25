@@ -236,8 +236,9 @@ impl<B: AutodiffBackend> CatcherPolicy<B> {
         let target_actor = actor_config.init(&device);
         let target_critic = critic_config.init(&device);
 
-        // Warmup batch size: start with 256 or 1/8 of full batch size
-        let warmup_batch_size = 256;
+        // Catcher-specific defaults: batch sizes for training
+        let batch_size = 64;
+        let warmup_batch_size = batch_size; // Catcher uses same size for warmup and full training
 
         Self {
             actor,
@@ -246,7 +247,7 @@ impl<B: AutodiffBackend> CatcherPolicy<B> {
             target_critic,
             gamma: 0.99,
             tau: 0.005,
-            batch_size: 64,
+            batch_size,
             actor_lr: 1e-4,
             critic_lr: 1e-3,
             noise_std: 0.1,
@@ -268,6 +269,8 @@ impl<B: AutodiffBackend> CatcherPolicy<B> {
         state_dim: usize,
         action_dim: usize,
         target_update_freq: usize,
+        batch_size: usize,
+        warmup_batch_size: usize,
     ) -> Self {
         let actor_config = ActorConfig::new().with_state_dim(state_dim);
         let critic_config = CriticConfig::new().with_state_dim(state_dim);
@@ -277,9 +280,6 @@ impl<B: AutodiffBackend> CatcherPolicy<B> {
         let target_actor = actor_config.init(&device);
         let target_critic = critic_config.init(&device);
 
-        // Warmup batch size: start with 256
-        let warmup_batch_size = 256;
-
         Self {
             actor,
             critic,
@@ -287,7 +287,7 @@ impl<B: AutodiffBackend> CatcherPolicy<B> {
             target_critic,
             gamma: 0.99,
             tau: 0.005,
-            batch_size: 64,
+            batch_size,
             actor_lr: 1e-4,
             critic_lr: 1e-3,
             noise_std: 0.1,
@@ -771,6 +771,221 @@ impl<B: AutodiffBackend> GpuTrainable<B> for CatcherPolicy<B> {
         self.maybe_update_target(self.step_count());
         self.update_epsilon();
         Some(loss)
+    }
+}
+
+// ============================================================================
+// burnme_rly::traits::GpuTrainable Implementation
+// ============================================================================
+
+impl<B: AutodiffBackend> burnme_rly::traits::GpuTrainable<B, HybridRingBuffer<B>>
+    for CatcherPolicy<B>
+{
+    fn buffer_mut(&mut self) -> &mut HybridRingBuffer<B> {
+        &mut self.gpu_buffer
+    }
+
+    fn buffer(&self) -> &HybridRingBuffer<B> {
+        &self.gpu_buffer
+    }
+
+    fn train_step_gpu_native(
+        &mut self,
+        _steps_since_last_train: usize,
+        device: &B::Device,
+    ) -> Option<f32> {
+        // Sample from buffer using sample_batch (HybridRingBuffer returns TensorTransitionBatch directly)
+        let batch_size = burnme_rly::traits::GpuTrainable::batch_size(self);
+        let batch = self.gpu_buffer.sample_batch(batch_size, device)?;
+
+        // Train on batch
+        let loss = burnme_rly::traits::GpuTrainable::train_step_gpu(self, &batch);
+        Some(loss)
+    }
+
+    fn train_step_gpu(&mut self, batch: &TensorTransitionBatch<B>) -> f32 {
+        // Catcher-specific GPU training logic (DDPG)
+
+        // Forward pass through actor and critic
+        let features = batch.states.clone();
+        let batch_size = batch.states.dims()[0];
+
+        // Convert actions from Int to Float for critic (actions are continuous in [-1, 1])
+        // For Catcher, actions are stored as discrete tier indices (0-9)
+        // We need to convert them back to continuous values in [-1, 1] for DDPG training
+        // Map [0, 9] -> [-1, 1]: continuous = (index / 9.0) * 2.0 - 1.0
+        // Batch actions are now rank-2 [batch_size, 1] with i32 type
+        let actions_int: Tensor<B, 2, Int> = batch.actions.clone();
+        let actions_int_1d: Tensor<B, 1, Int> = actions_int.squeeze();
+        let actions_i64: Vec<i64> = actions_int_1d
+            .into_data()
+            .convert::<i64>()
+            .as_slice::<i64>()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        let actions_float: Vec<f32> = actions_i64
+            .iter()
+            .map(|&idx| ((idx as f32 / 9.0) * 2.0) - 1.0)
+            .collect();
+        let actions_2d: Tensor<B, 2> = Tensor::from_data(
+            TensorData::new(actions_float, [batch_size, 1]).convert::<f32>(),
+            &self.device,
+        );
+
+        let _q_values = self.critic.forward(features.clone(), actions_2d.clone());
+
+        // Compute target Q-values
+        let next_features = batch.next_states.clone();
+        let next_actions = self.target_actor.forward(next_features.clone());
+        let next_q_values = self.target_critic.forward(next_features, next_actions);
+        let max_next_q: Tensor<B, 1> = next_q_values.squeeze();
+
+        // TD target: y = r + (1 - done) * gamma * Q'(s', a')
+        // Batch dones is rank-2 [batch_size, 1], squeeze to rank-1
+        let dones_1d: Tensor<B, 1> = batch.dones.clone().squeeze();
+        let not_done = dones_1d.clone().neg().add_scalar(1.0f32);
+        let gamma_tensor = Tensor::from_data(
+            TensorData::new(vec![self.gamma], [1]).convert::<f32>(),
+            &self.device,
+        );
+        // Batch rewards is rank-2 [batch_size, 1], squeeze to rank-1
+        let rewards_1d: Tensor<B, 1> = batch.rewards.clone().squeeze();
+        let target_q = rewards_1d
+            .add(max_next_q.mul(not_done).mul(gamma_tensor))
+            .detach();
+
+        // Current Q-values for actions taken
+        let current_q: Tensor<B, 1> = self.critic.forward(features, actions_2d).squeeze();
+
+        // Compute critic loss (MSE)
+        let critic_loss = current_q.sub(target_q).powf_scalar(2.0).mean();
+
+        // Get critic loss value before backward
+        let critic_loss_val: f32 = critic_loss
+            .clone()
+            .into_data()
+            .convert::<f32>()
+            .as_slice::<f32>()
+            .unwrap()[0];
+
+        // Backward pass and optimize critic
+        let grads = critic_loss.backward();
+        let grads_params = GradientsParams::from_grads(grads, &self.critic);
+        let mut critic_optimizer = AdamConfig::new().init();
+        self.critic = critic_optimizer.step(self.critic_lr, self.critic.clone(), grads_params);
+
+        // Update actor (every other step for stability)
+        let actor_loss = if self.step_count % 2 == 0 {
+            // Actor loss: -mean(Q(s, actor(s)))
+            let actor_actions = self.actor.forward(batch.states.clone());
+            let actor_q_values = self.critic.forward(batch.states.clone(), actor_actions);
+            let actor_loss = -actor_q_values.mean();
+
+            let actor_loss_val = actor_loss
+                .clone()
+                .into_data()
+                .convert::<f32>()
+                .as_slice()
+                .unwrap()[0];
+
+            // Backward pass and optimize actor
+            let grads = actor_loss.backward();
+            let grads_params = GradientsParams::from_grads(grads, &self.actor);
+            let mut actor_optimizer = AdamConfig::new().init();
+            self.actor = actor_optimizer.step(self.actor_lr, self.actor.clone(), grads_params);
+
+            actor_loss_val
+        } else {
+            0.0
+        };
+
+        // Soft update target networks
+        self.soft_update_targets();
+
+        critic_loss_val + actor_loss
+    }
+
+    fn device(&self) -> &B::Device {
+        &self.device
+    }
+
+    fn state_dim(&self) -> usize {
+        self.state_dim
+    }
+
+    fn buffer_len(&self) -> usize {
+        self.gpu_buffer.len()
+    }
+
+    fn warmup_batch_size(&self) -> usize {
+        self.warmup_batch_size
+    }
+
+    fn is_warmup_complete(&self) -> bool {
+        self.warmup_complete
+    }
+
+    fn set_warmup_complete(&mut self, complete: bool) {
+        self.warmup_complete = complete;
+    }
+
+    fn epsilon(&self) -> f32 {
+        // Catcher uses deterministic policy with Gaussian noise
+        // Return noise_std as a proxy for exploration
+        self.noise_std as f32
+    }
+
+    fn step_count(&self) -> usize {
+        self.step_count
+    }
+
+    fn increment_step_count(&mut self) {
+        self.step_count += 1;
+    }
+
+    fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    fn target_update_freq(&self) -> usize {
+        self.target_update_freq
+    }
+
+    fn learning_rate(&self) -> f32 {
+        // Catcher has actor_lr and critic_lr, return actor_lr as primary
+        self.actor_lr as f32
+    }
+
+    fn gamma(&self) -> f32 {
+        self.gamma
+    }
+
+    fn decay_exploration(&mut self) {
+        // Decay exploration noise (similar to epsilon decay in DQN)
+        // Decay towards minimum noise of 0.01
+        self.noise_std = (self.noise_std * 0.995).max(0.01);
+    }
+
+    fn update_target_network(&mut self) {
+        // Hard update target networks
+        self.target_actor = self.actor.clone();
+        self.target_critic = self.critic.clone();
+    }
+
+    fn save_checkpoint(&self, path: &str) -> Result<(), Box<dyn Error>> {
+        // Note: Burn doesn't have a simple save/load API yet
+        // This is a placeholder - actual implementation would use
+        // Burn's ModelRecorder trait or similar serialization
+        let _ = path;
+        Err("Save not yet implemented - requires Burn ModelRecorder".into())
+    }
+
+    fn load_checkpoint(&mut self, path: &str) -> Result<(), Box<dyn Error>> {
+        // Note: Burn doesn't have a simple load API yet
+        let _ = path;
+        Err("Load not yet implemented - requires Burn ModelRecorder".into())
     }
 }
 

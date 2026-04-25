@@ -68,6 +68,8 @@ pub struct TrainingConfig {
     pub checkpoint_interval: usize,
     /// Maximum gradient norm for clipping
     pub max_gradient_norm: f32,
+    /// Warmup batch size (smaller batch during warmup phase)
+    pub warmup_batch_size: usize,
 }
 
 impl Default for TrainingConfig {
@@ -85,6 +87,7 @@ impl Default for TrainingConfig {
             backend: "wgpu".to_string(),
             checkpoint_interval: 10,
             max_gradient_norm: 1.0,
+            warmup_batch_size: 256,
         }
     }
 }
@@ -157,9 +160,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             .with_beta_1(0.9)
             .with_beta_2(0.999)
             .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(
-                config.max_gradient_norm,
-            )))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.max_gradient_norm)))
             .init();
 
         Self {
@@ -174,8 +175,8 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             accumulation_counter: 0,
             accumulated_loss: Tensor::zeros([1], &device),
             accumulated_loss_count: 0,
-            loss_sync_freq: 500,    // Sync every 500 steps
-            warmup_batch_size: 256, // Start with 256, fills in 8 steps (with 32 envs)
+            loss_sync_freq: 500, // Sync every 500 steps
+            warmup_batch_size: config.warmup_batch_size,
             warmup_complete: false,
             optimizer,
         }
@@ -201,11 +202,11 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         // Tensors are already on GPU - no conversion needed!
         // Actions are [batch_size, 1] Int tensor -> squeeze to [batch_size]
         let actions: Tensor<B, 1, Int> = batch.actions.clone().squeeze(); // squeeze() creates new tensor
-        // Rewards are [batch_size, 1] -> squeeze to [batch_size]
+                                                                          // Rewards are [batch_size, 1] -> squeeze to [batch_size]
         let rewards: Tensor<B, 1> = batch.rewards.clone().squeeze(); // squeeze() creates new tensor
         let states = batch.states.clone(); // still needed - forward() takes ownership
         let next_states = batch.next_states.clone(); // still needed
-        // Dones are [batch_size, 1] -> squeeze to [batch_size]
+                                                     // Dones are [batch_size, 1] -> squeeze to [batch_size]
         let dones: Tensor<B, 1> = batch.dones.clone().squeeze(); // squeeze() creates new tensor
 
         // Forward pass through policy network (with gradients)
@@ -236,11 +237,13 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         let grads = loss.backward();
         // Detach loss immediately to drop computation graph before optimizer step
         let loss_detached = loss.detach();
-        
+
         let grads_params = GradientsParams::from_grads(grads, &self.model);
 
         // Update model with CACHED optimizer (massive speedup!)
-        self.model = self.optimizer.step(self.config.learning_rate, self.model.clone(), grads_params);
+        self.model =
+            self.optimizer
+                .step(self.config.learning_rate, self.model.clone(), grads_params);
 
         // Soft update target network
         self.step_count += 1;
@@ -334,7 +337,8 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
 
             // Update model with CACHED optimizer (massive speedup!)
             self.model =
-                self.optimizer.step(self.config.learning_rate, self.model.clone(), grads_params);
+                self.optimizer
+                    .step(self.config.learning_rate, self.model.clone(), grads_params);
 
             // Update target network and epsilon
             self.step_count += 1;
@@ -500,7 +504,8 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             // Update model with CACHED optimizer (massive speedup!)
             // DEPRECATED: Manual optimizer.step() - Burn TrainStep handles this automatically
             self.model =
-                self.optimizer.step(self.config.learning_rate, self.model.clone(), grads_params);
+                self.optimizer
+                    .step(self.config.learning_rate, self.model.clone(), grads_params);
         }
 
         // Soft update target network periodically
@@ -670,7 +675,9 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         // Update model with CACHED optimizer (massive speedup!)
         // Gradients were already scaled by 1/accumulation_steps during backward,
         // so use the original learning rate
-        self.model = self.optimizer.step(self.config.learning_rate, self.model.clone(), grads);
+        self.model = self
+            .optimizer
+            .step(self.config.learning_rate, self.model.clone(), grads);
 
         // Update target network and epsilon (like regular train_step)
         self.step_count += 1;
@@ -860,10 +867,11 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             .with_beta_1(0.9)
             .with_beta_2(0.999)
             .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(
-                config.max_gradient_norm,
-            )))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.max_gradient_norm)))
             .init();
+
+        // Read config values before moving config
+        let warmup_batch_size = config.warmup_batch_size;
 
         Ok(Self {
             model,
@@ -877,8 +885,8 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             accumulation_counter: 0,
             accumulated_loss: Tensor::zeros([1], &device),
             accumulated_loss_count: 0,
-            loss_sync_freq: 500,    // Sync every 500 steps
-            warmup_batch_size: 256, // Start with 256, fills in 8 steps (with 32 envs)
+            loss_sync_freq: 500, // Sync every 500 steps
+            warmup_batch_size,
             warmup_complete: false,
             optimizer,
         })

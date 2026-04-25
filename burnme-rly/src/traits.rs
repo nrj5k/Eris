@@ -1,18 +1,16 @@
 //! Core traits for GPU-native training
 //!
-//! This module defines the key abstractions that enable GPU-native training
+//! This module defines the key abstractions for GPU-native training
 //! across different policy types (DQN, Bandit, Catcher, Metis, etc.).
 
 #![allow(unexpected_cfgs)]
-#![allow(deprecated)]
 
-use crate::buffer::{CpuRingBuffer, TensorRingBuffer};
 use crate::env::StepResult;
 use crate::space::DiscreteSpace;
 use burn::tensor::backend::AutodiffBackend;
 use std::error::Error;
 
-/// Trait for agents that support GPU-native training with CpuRingBuffer.
+/// Trait for agents that support GPU-native training with configurable buffer type.
 ///
 /// This trait abstracts GPU-native training operations that work
 /// across different policy types (DQN, Bandit, Catcher, Metis, etc.).
@@ -31,7 +29,7 @@ use std::error::Error;
 ///     // ... other fields
 /// }
 ///
-/// impl<B: AutodiffBackend> GpuTrainable<B> for MyPolicy<B> {
+/// impl<B: AutodiffBackend> GpuTrainable<B, CpuRingBuffer> for MyPolicy<B> {
 ///     fn buffer_mut(&mut self) -> &mut CpuRingBuffer {
 ///         &mut self.buffer
 ///     }
@@ -57,24 +55,12 @@ use std::error::Error;
 ///     fn gamma(&self) -> f32 { 0.99 }
 /// }
 /// ```
-pub trait GpuTrainable<B: AutodiffBackend> {
-    /// Get mutable reference to the CPU replay buffer.
-    fn buffer_mut(&mut self) -> &mut CpuRingBuffer;
+pub trait GpuTrainable<B: AutodiffBackend, Buf> {
+    /// Get mutable reference to the replay buffer.
+    fn buffer_mut(&mut self) -> &mut Buf;
 
-    /// Get immutable reference to the CPU replay buffer.
-    fn buffer(&self) -> &CpuRingBuffer;
-
-    /// Get mutable reference to the GPU replay buffer (deprecated).
-    #[deprecated(since = "0.2.0", note = "Use buffer_mut() instead")]
-    fn gpu_buffer_mut(&mut self) -> &mut TensorRingBuffer<B> {
-        unimplemented!("Use buffer_mut() instead")
-    }
-
-    /// Get immutable reference to the GPU replay buffer (deprecated).
-    #[deprecated(since = "0.2.0", note = "Use buffer() instead")]
-    fn gpu_buffer(&self) -> &TensorRingBuffer<B> {
-        unimplemented!("Use buffer() instead")
-    }
+    /// Get immutable reference to the replay buffer.
+    fn buffer(&self) -> &Buf;
 
     /// Perform a GPU-native training step with warmup support.
     ///
@@ -287,7 +273,7 @@ pub trait GpuTrainable<B: AutodiffBackend> {
 }
 
 /// Helper methods for GpuTrainable (default implementations)
-pub trait GpuTrainableExt<B: AutodiffBackend>: GpuTrainable<B> {
+pub trait GpuTrainableExt<B: AutodiffBackend, Buf>: GpuTrainable<B, Buf> {
     /// Get effective batch size based on warmup state.
     ///
     /// During warmup: uses warmup_batch_size
@@ -338,7 +324,7 @@ pub trait GpuTrainableExt<B: AutodiffBackend>: GpuTrainable<B> {
 }
 
 // Blanket implementation
-impl<B: AutodiffBackend, T: GpuTrainable<B>> GpuTrainableExt<B> for T {}
+impl<B: AutodiffBackend, Buf, T: GpuTrainable<B, Buf>> GpuTrainableExt<B, Buf> for T {}
 
 /// Trait for agents that can select actions in batches.
 ///
@@ -455,7 +441,7 @@ mod tests {
         }
     }
 
-    impl<B: AutodiffBackend> GpuTrainable<B> for MockAgent<B> {
+    impl<B: AutodiffBackend> GpuTrainable<B, CpuRingBuffer> for MockAgent<B> {
         fn buffer_mut(&mut self) -> &mut CpuRingBuffer {
             &mut self.buffer
         }

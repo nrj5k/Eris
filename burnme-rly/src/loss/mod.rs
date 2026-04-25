@@ -163,43 +163,6 @@ pub fn compute_td_loss<B: AutodiffBackend>(
     diff.powf_scalar(2.0).mean()
 }
 
-/// Compute Double DQN temporal difference loss (rank-2 version).
-///
-/// Uses rank-2 tensor layout. Policy network selects actions, target evaluates.
-///
-/// Loss = mean((r + γ * Q_target(s', argmax Q_policy(s', a')) * (1 - done) - Q(s, a))^2)
-pub fn compute_double_dqn_loss_rank2<B: AutodiffBackend>(
-    q_values: Tensor<B, 2>,
-    next_q_policy: Tensor<B, 2>,
-    next_q_target: Tensor<B, 2>,
-    actions: &Tensor<B, 2, Int>,
-    rewards: &Tensor<B, 2>,
-    dones: &Tensor<B, 2>,
-    gamma: f32,
-) -> Tensor<B, 1> {
-    let device = q_values.device();
-    let batch_size = rewards.shape().dims[0];
-
-    // Gather Q-values for taken actions
-    let current_q = q_values.gather(1, actions.clone());
-
-    // Policy selects best actions
-    let best_actions = next_q_policy.argmax(1);
-
-    // Target evaluates selected actions
-    let max_next_q = next_q_target.gather(1, best_actions);
-
-    // TD target
-    let target_q = rewards.clone()
-        + Tensor::full([batch_size, 1], gamma, &device)
-            * max_next_q
-            * (Tensor::ones_like(dones) - dones.clone());
-
-    // MSE loss
-    let diff = current_q - target_q.detach();
-    diff.powf_scalar(2.0).mean()
-}
-
 /// Safely extract scalar value from loss tensor
 ///
 /// # Arguments
@@ -534,33 +497,6 @@ mod tests {
         assert!(
             (loss_val - 0.0).abs() < 1e-5,
             "Expected ~0, got {}",
-            loss_val
-        );
-    }
-
-    #[test]
-    fn test_compute_double_dqn_loss_rank2() {
-        let device = Default::default();
-        let q_values = Tensor::<TestBackend, 2>::ones([2, 3], &device);
-        let next_q_policy = Tensor::<TestBackend, 2>::zeros([2, 3], &device);
-        let next_q_target = Tensor::<TestBackend, 2>::zeros([2, 3], &device);
-        let actions = Tensor::<TestBackend, 2, Int>::zeros([2, 1], &device);
-        let rewards = Tensor::<TestBackend, 2>::zeros([2, 1], &device);
-        let dones = Tensor::<TestBackend, 2>::ones([2, 1], &device);
-
-        let loss = compute_double_dqn_loss_rank2(
-            q_values,
-            next_q_policy,
-            next_q_target,
-            &actions,
-            &rewards,
-            &dones,
-            0.99,
-        );
-        let loss_val: f32 = loss.into_data().convert::<f32>().as_slice().unwrap()[0];
-        assert!(
-            loss_val.is_finite(),
-            "Loss should be finite, got {}",
             loss_val
         );
     }

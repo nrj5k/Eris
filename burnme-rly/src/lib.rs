@@ -4,7 +4,7 @@
 //!
 //! ## Features
 //!
-//! - **GPU-native**: Zero-allocation experience replay with TensorRingBuffer
+//! - **GPU-native**: Zero-allocation experience replay with CpuRingBuffer + TensorTransitionBatch
 //! - **Backend-agnostic**: Works with CUDA, WGPU, CPU (NdArray)
 //! - **Vectorized environments**: Train multiple environments in parallel
 //! - **Warmup handling**: Automatic batch size ramp-up for stable training
@@ -48,11 +48,9 @@ pub mod traits;
 pub mod warmup;
 
 // Re-export main types for convenient use
-// TensorRingBuffer is deprecated but re-exported for backward compatibility
-#[allow(deprecated)]
 pub use buffer::{
-    CpuRingBuffer, GpuRingBuffer, GpuTransitionBatch, HybridRingBuffer, TensorRingBuffer,
-    TensorTransitionBatch, Transition,
+    CpuRingBuffer, GpuRingBuffer, GpuTransitionBatch, HybridRingBuffer, TensorTransitionBatch,
+    Transition,
 };
 pub use checkpoint::{
     load_checkpoint, save_checkpoint, CheckpointMetadata, CheckpointMetadataExt, Checkpointable,
@@ -61,16 +59,16 @@ pub use checkpoint::{
 pub use coordinator::{GpuTrainingCoordinator, TrainingConfig, TrainingMetrics};
 pub use diagnostics::{log_backend_info, SimpleTimer};
 pub use env::{Info, StepResult};
-pub use loss::{
-    compute_double_dqn_loss, compute_double_dqn_loss_rank2, compute_td_loss, compute_td_target,
-};
+pub use loss::{compute_double_dqn_loss, compute_td_loss, compute_td_target};
 pub use models::{
-    ComposableModel, ComposeConfig, MetisV2Config, MetisV2Policy, ParallelCompose,
-    PpoModel, PpoModelConfig, SequentialCompose,
+    ComposableModel, ComposeConfig, MetisV2Config, MetisV2Policy, ParallelCompose, PpoModel,
+    PpoModelConfig, SequentialCompose,
 };
 pub use prefetch::PrefetchBuffer;
 pub use space::DiscreteSpace;
-pub use trainers::{DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig, PpoTrainer, PpoTrainerConfig};
+pub use trainers::{
+    DQNTrainer, DQNTrainerConfig, MetisTrainer, MetisTrainerConfig, PpoTrainer, PpoTrainerConfig,
+};
 pub use traits::{BatchedActionSelector, GpuTrainable, GpuTrainableExt, VecEnvironment};
 pub use warmup::{should_train, train_step_with_warmup, train_step_with_warmup_config};
 
