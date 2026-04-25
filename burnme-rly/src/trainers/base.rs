@@ -233,6 +233,12 @@ pub trait TrainerConfig: Clone {
             return Err("warmup_batch_size must be > 0".to_string());
         }
 
+        // Loss sync frequency must be positive
+        let loss_sync_freq = self.loss_sync_freq();
+        if loss_sync_freq == 0 {
+            return Err("loss_sync_freq must be > 0".to_string());
+        }
+
         // Warn about non-warp-aligned batch size
         if !self.is_batch_size_warp_aligned() {
             log::warn!(

@@ -648,7 +648,7 @@ mod tests {
         let config = MetisV2Config::default();
         assert!((config.bandit_loss_weight - 0.5).abs() < 1e-6);
         assert!((config.max_gradient_norm - 1.0).abs() < 1e-6);
-        assert_eq!(config.batch_size, 32);
+        assert_eq!(config.batch_size, 2048);
     }
 
     #[test]

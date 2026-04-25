@@ -10,7 +10,7 @@ use crate::checkpoint::{
     load_checkpoint, save_checkpoint, CheckpointMetadata, CheckpointMetadataExt,
 };
 use crate::loss::{self, LossAccumulator};
-use crate::trainers::base::TrainerConfig;
+use crate::trainers::base::{TrainerConfig, TrainerConfigBase};
 
 /// Trait for modules that can compute Q-values
 ///
@@ -29,225 +29,79 @@ pub trait QNetwork<B: AutodiffBackend>: AutodiffModule<B> {
 /// Training hyperparameters for DQNTrainer
 #[derive(Debug, Clone)]
 pub struct DQNTrainerConfig {
-    pub gamma: f32,
-    pub epsilon_start: f32,
-    pub epsilon_end: f32,
-    pub epsilon_decay: f32,
-    pub learning_rate: f64,
-    /// Batch size for training. Should be warp-aligned (multiple of 32) for optimal
-    /// GPU utilization. Default: 2048 (32 × 64 warps).
-    ///
-    /// # Why Warp Alignment Matters
-    ///
-    /// NVIDIA GPUs execute instructions in groups of 32 threads called "warps".
-    /// Non-warp-aligned batch sizes waste GPU compute cycles because the GPU must
-    /// execute partial warps, leaving some threads idle.
-    ///
-    /// For example, with batch_size=100:
-    /// - GPU allocates 4 warps (128 threads)
-    /// - Only 100 threads do work
-    /// - 28 threads (22%) are wasted
-    ///
-    /// With batch_size=128 (warp-aligned):
-    /// - GPU allocates exactly 4 warps
-    /// - All 128 threads do work
-    /// - 0% waste, maximum occupancy
-    ///
-    /// # Recommended Values
-    ///
-    /// - 2048 = 64 warps (excellent occupancy, Metis default)
-    /// - 1024 = 32 warps (good for smaller GPUs)
-    /// - 512  = 16 warps (minimum for decent utilization)
-    ///
-    /// The default 2048 was benchmarked to provide best throughput on most GPUs.
-    pub batch_size: usize,
-    pub buffer_capacity: usize,
-    pub target_update_freq: usize,
-    pub max_gradient_norm: f32,
-
-    // NEW: Async loss configuration (from Metis optimization)
-    /// Loss sync frequency. Controls how often loss is synced from GPU to CPU.
-    /// Higher values reduce GPU→CPU synchronization overhead.
-    /// Default: 100 (sync every 100 steps, recommended for performance)
-    /// Set to 1 for backward compatibility (sync every step)
-    pub loss_sync_freq: usize,
-
-    // NEW: Warmup configuration (from Metis optimization)
-    /// Number of warmup steps before using full batch size.
-    /// During warmup, uses smaller batches to stabilize training.
-    /// Default: 1000
-    pub warmup_steps: usize,
-
-    /// Batch size during warmup period.
-    /// Should be smaller than batch_size.
-    /// Default: 256
-    pub warmup_batch_size: usize,
+    pub base: TrainerConfigBase,
 }
 
 impl Default for DQNTrainerConfig {
     fn default() -> Self {
         Self {
-            gamma: 0.99,
-            epsilon_start: 1.0,
-            epsilon_end: 0.01,
-            epsilon_decay: 0.995,
-            learning_rate: 0.0001,
-            batch_size: 2048,
-            buffer_capacity: 100_000,
-            target_update_freq: 1000,
-            max_gradient_norm: 1.0,
-            // NEW defaults:
-            loss_sync_freq: 500,    // Sync every 500 steps (Metis optimization)
-            warmup_steps: 1000,     // 1000 steps of warmup
-            warmup_batch_size: 256, // Smaller batches during warmup
+            base: TrainerConfigBase::default(),
         }
     }
 }
 
 impl TrainerConfig for DQNTrainerConfig {
-    fn gamma(&self) -> f32 {
-        self.gamma
-    }
-    fn epsilon_start(&self) -> f32 {
-        self.epsilon_start
-    }
-    fn epsilon_end(&self) -> f32 {
-        self.epsilon_end
-    }
-    fn epsilon_decay(&self) -> f32 {
-        self.epsilon_decay
-    }
-    fn learning_rate(&self) -> f64 {
-        self.learning_rate
-    }
-    fn batch_size(&self) -> usize {
-        self.batch_size
-    }
-    fn buffer_capacity(&self) -> usize {
-        self.buffer_capacity
-    }
-    fn target_update_freq(&self) -> usize {
-        self.target_update_freq
-    }
-    fn max_gradient_norm(&self) -> f32 {
-        self.max_gradient_norm
-    }
+    fn gamma(&self) -> f32 { self.base.gamma }
+    fn epsilon_start(&self) -> f32 { self.base.epsilon_start }
+    fn epsilon_end(&self) -> f32 { self.base.epsilon_end }
+    fn epsilon_decay(&self) -> f32 { self.base.epsilon_decay }
+    fn learning_rate(&self) -> f64 { self.base.learning_rate }
+    fn batch_size(&self) -> usize { self.base.batch_size }
+    fn buffer_capacity(&self) -> usize { self.base.buffer_capacity }
+    fn target_update_freq(&self) -> usize { self.base.target_update_freq }
+    fn max_gradient_norm(&self) -> f32 { self.base.max_gradient_norm }
+    fn loss_sync_freq(&self) -> usize { self.base.loss_sync_freq }
+    fn warmup_steps(&self) -> usize { self.base.warmup_steps }
+    fn warmup_batch_size(&self) -> usize { self.base.warmup_batch_size }
 }
 
 impl DQNTrainerConfig {
-    pub fn with_gamma(mut self, gamma: f32) -> Self {
-        self.gamma = gamma;
-        self
+    pub fn with_gamma(self, gamma: f32) -> Self {
+        Self { base: self.base.with_gamma(gamma) }
     }
-    pub fn with_epsilon_start(mut self, epsilon: f32) -> Self {
-        self.epsilon_start = epsilon;
-        self
+    pub fn with_epsilon_start(self, epsilon: f32) -> Self {
+        Self { base: self.base.with_epsilon_start(epsilon) }
     }
-    pub fn with_epsilon_end(mut self, epsilon: f32) -> Self {
-        self.epsilon_end = epsilon;
-        self
+    pub fn with_epsilon_end(self, epsilon: f32) -> Self {
+        Self { base: self.base.with_epsilon_end(epsilon) }
     }
-    pub fn with_learning_rate(mut self, lr: f64) -> Self {
-        self.learning_rate = lr;
-        self
+    pub fn with_epsilon_decay(self, decay: f32) -> Self {
+        Self { base: self.base.with_epsilon_decay(decay) }
     }
-    pub fn with_batch_size(mut self, size: usize) -> Self {
-        self.batch_size = size;
-        self
+    pub fn with_learning_rate(self, lr: f64) -> Self {
+        Self { base: self.base.with_learning_rate(lr) }
     }
-    pub fn with_buffer_capacity(mut self, cap: usize) -> Self {
-        self.buffer_capacity = cap;
-        self
+    pub fn with_batch_size(self, size: usize) -> Self {
+        Self { base: self.base.with_batch_size(size) }
     }
-    pub fn with_target_update_freq(mut self, freq: usize) -> Self {
-        self.target_update_freq = freq;
-        self
+    pub fn with_buffer_capacity(self, cap: usize) -> Self {
+        Self { base: self.base.with_buffer_capacity(cap) }
     }
-    pub fn with_max_gradient_norm(mut self, norm: f32) -> Self {
-        self.max_gradient_norm = norm;
-        self
+    pub fn with_target_update_freq(self, freq: usize) -> Self {
+        Self { base: self.base.with_target_update_freq(freq) }
     }
-
-    /// Set loss sync frequency.
-    /// Higher values = fewer GPU→CPU syncs = better performance.
-    /// Recommended: 100 (Metis default)
-    /// Backward compatible: 1 (sync every step)
-    pub fn with_loss_sync_freq(mut self, freq: usize) -> Self {
-        self.loss_sync_freq = freq;
-        self
+    pub fn with_max_gradient_norm(self, norm: f32) -> Self {
+        Self { base: self.base.with_max_gradient_norm(norm) }
     }
-
-    /// Set warmup steps.
-    /// Number of steps to use warmup_batch_size before switching to full batch_size.
-    pub fn with_warmup_steps(mut self, steps: usize) -> Self {
-        self.warmup_steps = steps;
-        self
+    pub fn with_loss_sync_freq(self, freq: usize) -> Self {
+        Self { base: self.base.with_loss_sync_freq(freq) }
     }
-
-    /// Set warmup batch size.
-    /// Smaller batch size used during warmup period.
-    pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
-        self.warmup_batch_size = size;
-        self
+    pub fn with_warmup_steps(self, steps: usize) -> Self {
+        Self { base: self.base.with_warmup_steps(steps) }
+    }
+    pub fn with_warmup_batch_size(self, size: usize) -> Self {
+        Self { base: self.base.with_warmup_batch_size(size) }
     }
 
     /// Validate configuration
     pub fn validate(&self) -> Result<(), String> {
-        if self.gamma <= 0.0 || self.gamma > 1.0 {
-            return Err("gamma must be in (0, 1]".to_string());
-        }
-        if self.epsilon_start < 0.0 || self.epsilon_start > 1.0 {
-            return Err("epsilon_start must be in [0, 1]".to_string());
-        }
-        if self.epsilon_end < 0.0 || self.epsilon_end > 1.0 {
-            return Err("epsilon_end must be in [0, 1]".to_string());
-        }
-        if self.epsilon_end > self.epsilon_start {
-            return Err("epsilon_end must be <= epsilon_start".to_string());
-        }
-        if self.epsilon_decay <= 0.0 || self.epsilon_decay > 1.0 {
-            return Err("epsilon_decay must be in (0, 1]".to_string());
-        }
-        if self.learning_rate <= 0.0 {
-            return Err("learning_rate must be > 0".to_string());
-        }
-        if self.batch_size == 0 {
-            return Err("batch_size must be > 0".to_string());
-        }
-        if self.buffer_capacity == 0 {
-            return Err("buffer_capacity must be > 0".to_string());
-        }
-        if self.max_gradient_norm <= 0.0 {
-            return Err("max_gradient_norm must be > 0".to_string());
-        }
-
-        // NEW validations:
-        if self.loss_sync_freq == 0 {
-            return Err("loss_sync_freq must be > 0".to_string());
-        }
-
-        if self.warmup_batch_size == 0 {
-            return Err("warmup_batch_size must be > 0".to_string());
-        }
-
-        if self.warmup_batch_size > self.batch_size {
+        self.base.validate()?;
+        if self.base.warmup_batch_size > self.base.batch_size {
             return Err(format!(
                 "warmup_batch_size ({}) cannot exceed batch_size ({})",
-                self.warmup_batch_size, self.batch_size
+                self.base.warmup_batch_size, self.base.batch_size
             ));
         }
-
-        // Warn about non-warp-aligned batch size
-        if !self.is_batch_size_warp_aligned() {
-            log::warn!(
-                "[STAGE:WARN] batch_size {} is not warp-aligned (not a multiple of 32). \
-                 Consider using {} for better GPU utilization. \
-                 Warp alignment reduces wasted GPU cycles.",
-                self.batch_size,
-                self.align_batch_size_to_warp()
-            );
-        }
-
         Ok(())
     }
 }
@@ -289,17 +143,17 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
         config.validate()?;
 
         let target_network = q_network.clone();
-        let buffer = GpuRingBuffer::new(config.buffer_capacity, state_dim, &device);
+        let buffer = GpuRingBuffer::new(config.base.buffer_capacity, state_dim, &device);
 
         let optimizer = AdamConfig::new()
             .with_beta_1(0.9)
             .with_beta_2(0.999)
             .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.max_gradient_norm)))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.base.max_gradient_norm)))
             .init();
 
         // Initialize loss accumulator (async loss - Metis optimization)
-        let loss_accumulator = LossAccumulator::new(config.loss_sync_freq, &device);
+        let loss_accumulator = LossAccumulator::new(config.base.loss_sync_freq, &device);
 
         Ok(Self {
             q_network,
@@ -307,7 +161,7 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
             buffer,
             config: config.clone(),
             step_count: 0,
-            epsilon: config.epsilon_start,
+            epsilon: config.base.epsilon_start,
             device: device.clone(),
             optimizer,
             loss_accumulator,
@@ -338,7 +192,7 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
         let grads_params = GradientsParams::from_grads(grads, &self.q_network);
 
         self.q_network = self.optimizer.step(
-            self.config.learning_rate,
+            self.config.base.learning_rate,
             self.q_network.clone(),
             grads_params,
         );
@@ -346,11 +200,11 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
 
     /// Update target network periodically
     fn maybe_update_target(&mut self) {
-        if self.config.target_update_freq > 0
+        if self.config.base.target_update_freq > 0
             && self.step_count > 0
             && self
                 .step_count
-                .is_multiple_of(self.config.target_update_freq)
+                .is_multiple_of(self.config.base.target_update_freq)
         {
             self.target_network = self.q_network.clone();
         }
@@ -358,7 +212,7 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
 
     /// Decay epsilon
     fn decay_epsilon(&mut self) {
-        self.epsilon = (self.epsilon * self.config.epsilon_decay).max(self.config.epsilon_end);
+        self.epsilon = (self.epsilon * self.config.base.epsilon_decay).max(self.config.base.epsilon_end);
     }
 
     /// Check if warmup is complete
@@ -369,10 +223,10 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
     /// Get effective batch size (accounts for warmup)
     pub fn effective_batch_size(&self) -> usize {
         if self.warmup_complete {
-            self.config.batch_size
+            self.config.base.batch_size
         } else {
             // During warmup, use smaller batch size
-            self.config.warmup_batch_size.min(self.config.batch_size)
+            self.config.base.warmup_batch_size.min(self.config.base.batch_size)
         }
     }
 
@@ -382,7 +236,7 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
             self.warmup_complete = true;
             log::info!(
                 "[STAGE:WARMUP] Warmup complete! Using full batch size: {}",
-                self.config.batch_size
+                self.config.base.batch_size
             );
         }
     }
@@ -395,7 +249,7 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
     /// Execute one DQN training step with Double DQN
     pub fn train_step(&mut self) -> Option<f32> {
         // Check warmup completion
-        if !self.warmup_complete && self.step_count >= self.config.warmup_steps {
+        if !self.warmup_complete && self.step_count >= self.config.base.warmup_steps {
             self.complete_warmup();
         }
 
@@ -427,7 +281,7 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
 
         // 7. Compute TD target using loss module
         let targets =
-            loss::compute_td_target(&batch.rewards, &max_next_q, &batch.dones, self.config.gamma);
+            loss::compute_td_target(&batch.rewards, &max_next_q, &batch.dones, self.config.base.gamma);
 
         // 8. MSE loss using loss module
         let loss = loss::compute_double_dqn_loss(&current_q, &targets);
@@ -486,9 +340,9 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = DQNTrainerConfig::default();
-        assert!((config.gamma - 0.99).abs() < 1e-6);
-        assert!((config.epsilon_start - 1.0).abs() < 1e-6);
-        assert_eq!(config.batch_size, 2048);
+        assert!((config.base.gamma - 0.99).abs() < 1e-6);
+        assert!((config.base.epsilon_start - 1.0).abs() < 1e-6);
+        assert_eq!(config.base.batch_size, 2048);
     }
 
     #[test]
@@ -503,14 +357,14 @@ mod tests {
             .with_target_update_freq(500)
             .with_max_gradient_norm(0.5);
 
-        assert!((config.gamma - 0.95).abs() < 1e-6);
-        assert!((config.epsilon_start - 0.9).abs() < 1e-6);
-        assert!((config.epsilon_end - 0.05).abs() < 1e-6);
-        assert!((config.learning_rate - 0.001).abs() < 1e-6);
-        assert_eq!(config.batch_size, 1024);
-        assert_eq!(config.buffer_capacity, 50_000);
-        assert_eq!(config.target_update_freq, 500);
-        assert!((config.max_gradient_norm - 0.5).abs() < 1e-6);
+        assert!((config.base.gamma - 0.95).abs() < 1e-6);
+        assert!((config.base.epsilon_start - 0.9).abs() < 1e-6);
+        assert!((config.base.epsilon_end - 0.05).abs() < 1e-6);
+        assert!((config.base.learning_rate - 0.001).abs() < 1e-6);
+        assert_eq!(config.base.batch_size, 1024);
+        assert_eq!(config.base.buffer_capacity, 50_000);
+        assert_eq!(config.base.target_update_freq, 500);
+        assert!((config.base.max_gradient_norm - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -536,9 +390,9 @@ mod tests {
     #[test]
     fn test_config_new_async_fields_defaults() {
         let config = DQNTrainerConfig::default();
-        assert_eq!(config.loss_sync_freq, 500);
-        assert_eq!(config.warmup_steps, 1000);
-        assert_eq!(config.warmup_batch_size, 256);
+        assert_eq!(config.base.loss_sync_freq, 500);
+        assert_eq!(config.base.warmup_steps, 1000);
+        assert_eq!(config.base.warmup_batch_size, 256);
     }
 
     #[test]
@@ -548,20 +402,22 @@ mod tests {
             .with_warmup_steps(500)
             .with_warmup_batch_size(128);
 
-        assert_eq!(config.loss_sync_freq, 50);
-        assert_eq!(config.warmup_steps, 500);
-        assert_eq!(config.warmup_batch_size, 128);
+        assert_eq!(config.base.loss_sync_freq, 50);
+        assert_eq!(config.base.warmup_steps, 500);
+        assert_eq!(config.base.warmup_batch_size, 128);
     }
 
     #[test]
     fn test_config_validate_loss_sync_freq_zero() {
         let config = DQNTrainerConfig::default().with_loss_sync_freq(0);
+        assert!(config.base.loss_sync_freq == 0);
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_warmup_batch_size_zero() {
         let config = DQNTrainerConfig::default().with_warmup_batch_size(0);
+        assert!(config.base.warmup_batch_size == 0);
         assert!(config.validate().is_err());
     }
 
@@ -570,6 +426,8 @@ mod tests {
         let config = DQNTrainerConfig::default()
             .with_batch_size(512)
             .with_warmup_batch_size(1024);
+        assert_eq!(config.base.batch_size, 512);
+        assert_eq!(config.base.warmup_batch_size, 1024);
         assert!(config.validate().is_err());
     }
 }

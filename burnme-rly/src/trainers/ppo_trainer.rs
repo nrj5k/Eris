@@ -14,151 +14,100 @@ use crate::checkpoint::{
     load_checkpoint, save_checkpoint, CheckpointMetadata, CheckpointMetadataExt,
 };
 use crate::models::ppo_model::PpoModel;
-use crate::trainers::base::TrainerConfig;
+use crate::trainers::base::{TrainerConfig, TrainerConfigBase};
 
 /// Training hyperparameters for PPOTrainer
 #[derive(Debug, Clone)]
 pub struct PpoTrainerConfig {
-    /// Discount factor for future rewards
-    pub gamma: f32,
-    /// PPO clip range (typically 0.2)
+    pub base: TrainerConfigBase,
     pub clip_epsilon: f32,
-    /// Weight for value loss (typically 0.5)
     pub value_loss_coef: f32,
-    /// Weight for entropy bonus (typically 0.01)
     pub entropy_coef: f32,
-    /// Learning rate
-    pub learning_rate: f64,
-    /// Batch size for PPO updates
-    pub batch_size: usize,
-    /// Rollout buffer capacity (on-policy, so smaller than DQN)
-    pub buffer_capacity: usize,
-    /// Number of PPO epochs per update (typically 3-10)
     pub ppo_epochs: usize,
-    /// Maximum gradient norm for clipping
-    pub max_gradient_norm: f32,
-    /// GAE lambda for advantage estimation (typically 0.95)
     pub gae_lambda: f32,
 }
 
 impl Default for PpoTrainerConfig {
     fn default() -> Self {
         Self {
-            gamma: 0.99,
+            base: TrainerConfigBase {
+                learning_rate: 0.0003,
+                batch_size: 64,
+                buffer_capacity: 2048,
+                max_gradient_norm: 0.5,
+                ..TrainerConfigBase::default()
+            },
             clip_epsilon: 0.2,
             value_loss_coef: 0.5,
             entropy_coef: 0.01,
-            learning_rate: 0.0003,
-            batch_size: 64,
-            buffer_capacity: 2048,
             ppo_epochs: 4,
-            max_gradient_norm: 0.5,
             gae_lambda: 0.95,
         }
     }
 }
 
 impl TrainerConfig for PpoTrainerConfig {
-    fn gamma(&self) -> f32 {
-        self.gamma
-    }
-    fn epsilon_start(&self) -> f32 {
-        0.0 // PPO uses stochastic policy, not epsilon-greedy
-    }
-    fn epsilon_end(&self) -> f32 {
-        0.0
-    }
-    fn epsilon_decay(&self) -> f32 {
-        1.0 // No decay for PPO
-    }
-    fn learning_rate(&self) -> f64 {
-        self.learning_rate
-    }
-    fn batch_size(&self) -> usize {
-        self.batch_size
-    }
-    fn buffer_capacity(&self) -> usize {
-        self.buffer_capacity
-    }
-    fn target_update_freq(&self) -> usize {
-        0 // PPO doesn't use target networks in the same way
-    }
-    fn max_gradient_norm(&self) -> f32 {
-        self.max_gradient_norm
-    }
+    fn gamma(&self) -> f32 { self.base.gamma }
+    fn epsilon_start(&self) -> f32 { 0.0 }
+    fn epsilon_end(&self) -> f32 { 0.0 }
+    fn epsilon_decay(&self) -> f32 { 1.0 }
+    fn learning_rate(&self) -> f64 { self.base.learning_rate }
+    fn batch_size(&self) -> usize { self.base.batch_size }
+    fn buffer_capacity(&self) -> usize { self.base.buffer_capacity }
+    fn target_update_freq(&self) -> usize { 0 }
+    fn max_gradient_norm(&self) -> f32 { self.base.max_gradient_norm }
+    fn loss_sync_freq(&self) -> usize { self.base.loss_sync_freq }
+    fn warmup_steps(&self) -> usize { self.base.warmup_steps }
+    fn warmup_batch_size(&self) -> usize { self.base.warmup_batch_size }
 }
 
 impl PpoTrainerConfig {
     pub fn with_gamma(mut self, gamma: f32) -> Self {
-        self.gamma = gamma;
-        self
+        self.base = self.base.with_gamma(gamma); self
     }
     pub fn with_clip_epsilon(mut self, epsilon: f32) -> Self {
-        self.clip_epsilon = epsilon;
-        self
+        self.clip_epsilon = epsilon; self
     }
     pub fn with_value_loss_coef(mut self, coef: f32) -> Self {
-        self.value_loss_coef = coef;
-        self
+        self.value_loss_coef = coef; self
     }
     pub fn with_entropy_coef(mut self, coef: f32) -> Self {
-        self.entropy_coef = coef;
-        self
+        self.entropy_coef = coef; self
     }
     pub fn with_learning_rate(mut self, lr: f64) -> Self {
-        self.learning_rate = lr;
-        self
+        self.base = self.base.with_learning_rate(lr); self
     }
     pub fn with_batch_size(mut self, size: usize) -> Self {
-        self.batch_size = size;
-        self
+        self.base = self.base.with_batch_size(size); self
     }
     pub fn with_buffer_capacity(mut self, cap: usize) -> Self {
-        self.buffer_capacity = cap;
-        self
+        self.base = self.base.with_buffer_capacity(cap); self
     }
     pub fn with_ppo_epochs(mut self, epochs: usize) -> Self {
-        self.ppo_epochs = epochs;
-        self
+        self.ppo_epochs = epochs; self
     }
     pub fn with_max_gradient_norm(mut self, norm: f32) -> Self {
-        self.max_gradient_norm = norm;
-        self
+        self.base = self.base.with_max_gradient_norm(norm); self
     }
     pub fn with_gae_lambda(mut self, lambda: f32) -> Self {
-        self.gae_lambda = lambda;
-        self
+        self.gae_lambda = lambda; self
+    }
+    pub fn with_warmup_steps(mut self, steps: usize) -> Self {
+        self.base = self.base.with_warmup_steps(steps); self
+    }
+    pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
+        self.base = self.base.with_warmup_batch_size(size); self
     }
 
     /// Validate configuration
     pub fn validate(&self) -> Result<(), String> {
-        if self.gamma <= 0.0 || self.gamma > 1.0 {
-            return Err("gamma must be in (0, 1]".to_string());
-        }
+        self.base.validate()?;
         if self.clip_epsilon <= 0.0 || self.clip_epsilon >= 1.0 {
             return Err("clip_epsilon must be in (0, 1)".to_string());
         }
-        if self.value_loss_coef < 0.0 {
-            return Err("value_loss_coef must be >= 0".to_string());
-        }
-        if self.entropy_coef < 0.0 {
-            return Err("entropy_coef must be >= 0".to_string());
-        }
-        if self.learning_rate <= 0.0 {
-            return Err("learning_rate must be > 0".to_string());
-        }
-        if self.batch_size == 0 {
-            return Err("batch_size must be > 0".to_string());
-        }
-        if self.buffer_capacity == 0 {
-            return Err("buffer_capacity must be > 0".to_string());
-        }
-        if self.ppo_epochs == 0 {
-            return Err("ppo_epochs must be > 0".to_string());
-        }
-        if self.max_gradient_norm <= 0.0 {
-            return Err("max_gradient_norm must be > 0".to_string());
-        }
+        if self.value_loss_coef < 0.0 { return Err("value_loss_coef must be >= 0".to_string()); }
+        if self.entropy_coef < 0.0 { return Err("entropy_coef must be >= 0".to_string()); }
+        if self.ppo_epochs == 0 { return Err("ppo_epochs must be > 0".to_string()); }
         if self.gae_lambda <= 0.0 || self.gae_lambda > 1.0 {
             return Err("gae_lambda must be in (0, 1]".to_string());
         }
@@ -213,13 +162,13 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
             .with_beta_1(0.9)
             .with_beta_2(0.999)
             .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.max_gradient_norm)))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.base.max_gradient_norm)))
             .init();
 
         Ok(Self {
             model,
             old_model,
-            buffer: CpuRingBuffer::new(config.buffer_capacity),
+            buffer: CpuRingBuffer::new(config.base.buffer_capacity),
             config: config.clone(),
             step_count: 0,
             device: device.clone(),
@@ -277,7 +226,7 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
     /// Execute one PPO training step
     pub fn train_step(&mut self) -> Option<f32> {
         // Check if we have enough samples
-        if self.buffer.len() < self.config.batch_size {
+        if self.buffer.len() < self.config.base.batch_size {
             return None;
         }
 
@@ -287,7 +236,7 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
         // PPO epochs: multiple passes over the same rollout data
         for _epoch in 0..self.config.ppo_epochs {
             // Sample batch from buffer
-            let transitions = self.buffer.sample(self.config.batch_size)?;
+            let transitions = self.buffer.sample(self.config.base.batch_size)?;
             let batch = crate::buffer::TensorTransitionBatch::from_transitions(
                 &transitions,
                 self.state_dim,
@@ -317,7 +266,7 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
             let rewards_1d = batch.rewards.clone().reshape([batch.batch_size()]);
 
             let not_dones = Tensor::<B, 1>::ones_like(&dones_1d) - dones_1d;
-            let returns = rewards_1d.clone() + self.config.gamma * next_values * not_dones;
+            let returns = rewards_1d.clone() + self.config.base.gamma * next_values * not_dones;
             let advantages = returns.clone() - values.clone();
 
             // Compute PPO loss
@@ -337,7 +286,7 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
             // Optimizer step
             self.model =
                 self.optimizer
-                    .step(self.config.learning_rate, self.model.clone(), grads_params);
+                    .step(self.config.base.learning_rate, self.model.clone(), grads_params);
 
             // Accumulate loss for logging
             let loss_value: f32 = loss.into_data().convert::<f32>().as_slice::<f32>().unwrap()[0];
@@ -409,11 +358,11 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = PpoTrainerConfig::default();
-        assert!((config.gamma - 0.99).abs() < 1e-6);
+        assert!((config.gamma() - 0.99).abs() < 1e-6);
         assert!((config.clip_epsilon - 0.2).abs() < 1e-6);
         assert!((config.value_loss_coef - 0.5).abs() < 1e-6);
         assert!((config.entropy_coef - 0.01).abs() < 1e-6);
-        assert_eq!(config.batch_size, 64);
+        assert_eq!(config.batch_size(), 64);
         assert_eq!(config.ppo_epochs, 4);
     }
 
@@ -431,15 +380,15 @@ mod tests {
             .with_max_gradient_norm(1.0)
             .with_gae_lambda(0.9);
 
-        assert!((config.gamma - 0.95).abs() < 1e-6);
+        assert!((config.gamma() - 0.95).abs() < 1e-6);
         assert!((config.clip_epsilon - 0.1).abs() < 1e-6);
         assert!((config.value_loss_coef - 0.25).abs() < 1e-6);
         assert!((config.entropy_coef - 0.02).abs() < 1e-6);
-        assert!((config.learning_rate - 0.001).abs() < 1e-6);
-        assert_eq!(config.batch_size, 128);
-        assert_eq!(config.buffer_capacity, 4096);
+        assert!((config.learning_rate() - 0.001).abs() < 1e-6);
+        assert_eq!(config.batch_size(), 128);
+        assert_eq!(config.buffer_capacity(), 4096);
         assert_eq!(config.ppo_epochs, 10);
-        assert!((config.max_gradient_norm - 1.0).abs() < 1e-6);
+        assert!((config.max_gradient_norm() - 1.0).abs() < 1e-6);
         assert!((config.gae_lambda - 0.9).abs() < 1e-6);
     }
 
@@ -477,12 +426,12 @@ mod tests {
 
         for i in (0..n).rev() {
             let delta = rewards[i]
-                + config.gamma
+                + config.gamma()
                     * values.get(i + 1).copied().unwrap_or(0.0)
                     * if dones[i] { 0.0 } else { 1.0 }
                 - values[i];
             last_gae = delta
-                + config.gamma * config.gae_lambda * if dones[i] { 0.0 } else { 1.0 } * last_gae;
+                + config.gamma() * config.gae_lambda * if dones[i] { 0.0 } else { 1.0 } * last_gae;
             advantages.push(last_gae);
             returns.push(last_gae + values[i]);
         }

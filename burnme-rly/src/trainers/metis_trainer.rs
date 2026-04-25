@@ -14,175 +14,99 @@ use crate::checkpoint::{
 };
 use crate::loss;
 use crate::models::CombinedModel;
-use crate::trainers::base::TrainerConfig;
+use crate::trainers::base::{TrainerConfig, TrainerConfigBase};
 
 /// Configuration for MetisTrainer
 #[derive(Debug, Clone)]
 pub struct MetisTrainerConfig {
-    pub gamma: f32,
-    pub epsilon_start: f32,
-    pub epsilon_end: f32,
-    pub epsilon_decay: f32,
-    pub learning_rate: f64,
-    /// Batch size for training. Should be warp-aligned (multiple of 32) for optimal
-    /// GPU utilization. Default: 2048 (32 × 64 warps).
-    ///
-    /// See [`DQNTrainerConfig`](crate::trainers::dqn_trainer::DQNTrainerConfig) for detailed
-    /// explanation of warp alignment.
-    ///
-    /// # Note for Metis (Combined Model)
-    ///
-    /// Metis uses a CombinedModel (Bandit + DQN) which benefits significantly from
-    /// larger batch sizes due to the increased model complexity. The default 2048
-    /// provides good throughput while maintaining training stability.
-    pub batch_size: usize,
-    pub buffer_capacity: usize,
-    pub target_update_freq: usize,
-    pub max_gradient_norm: f32,
+    pub base: TrainerConfigBase,
     pub bandit_loss_weight: f32,
-    pub warmup_steps: usize,
-    pub warmup_batch_size: usize,
 }
 
 impl Default for MetisTrainerConfig {
     fn default() -> Self {
         Self {
-            gamma: 0.99,
-            epsilon_start: 1.0,
-            epsilon_end: 0.01,
-            epsilon_decay: 0.995,
-            learning_rate: 0.0001,
-            batch_size: 2048,
-            buffer_capacity: 100_000,
-            target_update_freq: 1000,
-            max_gradient_norm: 1.0,
+            base: TrainerConfigBase::default(),
             bandit_loss_weight: 0.5,
-            warmup_steps: 1000,
-            warmup_batch_size: 256,
         }
     }
 }
 
 impl TrainerConfig for MetisTrainerConfig {
-    fn gamma(&self) -> f32 {
-        self.gamma
-    }
-    fn epsilon_start(&self) -> f32 {
-        self.epsilon_start
-    }
-    fn epsilon_end(&self) -> f32 {
-        self.epsilon_end
-    }
-    fn epsilon_decay(&self) -> f32 {
-        self.epsilon_decay
-    }
-    fn learning_rate(&self) -> f64 {
-        self.learning_rate
-    }
-    fn batch_size(&self) -> usize {
-        self.batch_size
-    }
-    fn buffer_capacity(&self) -> usize {
-        self.buffer_capacity
-    }
-    fn target_update_freq(&self) -> usize {
-        self.target_update_freq
-    }
-    fn max_gradient_norm(&self) -> f32 {
-        self.max_gradient_norm
-    }
+    fn gamma(&self) -> f32 { self.base.gamma }
+    fn epsilon_start(&self) -> f32 { self.base.epsilon_start }
+    fn epsilon_end(&self) -> f32 { self.base.epsilon_end }
+    fn epsilon_decay(&self) -> f32 { self.base.epsilon_decay }
+    fn learning_rate(&self) -> f64 { self.base.learning_rate }
+    fn batch_size(&self) -> usize { self.base.batch_size }
+    fn buffer_capacity(&self) -> usize { self.base.buffer_capacity }
+    fn target_update_freq(&self) -> usize { self.base.target_update_freq }
+    fn max_gradient_norm(&self) -> f32 { self.base.max_gradient_norm }
+    fn loss_sync_freq(&self) -> usize { self.base.loss_sync_freq }
+    fn warmup_steps(&self) -> usize { self.base.warmup_steps }
+    fn warmup_batch_size(&self) -> usize { self.base.warmup_batch_size }
 }
 
 impl MetisTrainerConfig {
     pub fn with_gamma(mut self, gamma: f32) -> Self {
-        self.gamma = gamma;
+        self.base = self.base.with_gamma(gamma);
         self
     }
     pub fn with_epsilon_start(mut self, epsilon: f32) -> Self {
-        self.epsilon_start = epsilon;
+        self.base = self.base.with_epsilon_start(epsilon);
         self
     }
     pub fn with_epsilon_end(mut self, epsilon: f32) -> Self {
-        self.epsilon_end = epsilon;
+        self.base = self.base.with_epsilon_end(epsilon);
+        self
+    }
+    pub fn with_epsilon_decay(mut self, decay: f32) -> Self {
+        self.base = self.base.with_epsilon_decay(decay);
         self
     }
     pub fn with_learning_rate(mut self, lr: f64) -> Self {
-        self.learning_rate = lr;
+        self.base = self.base.with_learning_rate(lr);
         self
     }
     pub fn with_batch_size(mut self, size: usize) -> Self {
-        self.batch_size = size;
+        self.base = self.base.with_batch_size(size);
         self
     }
     pub fn with_buffer_capacity(mut self, cap: usize) -> Self {
-        self.buffer_capacity = cap;
+        self.base = self.base.with_buffer_capacity(cap);
         self
     }
     pub fn with_target_update_freq(mut self, freq: usize) -> Self {
-        self.target_update_freq = freq;
+        self.base = self.base.with_target_update_freq(freq);
         self
     }
     pub fn with_max_gradient_norm(mut self, norm: f32) -> Self {
-        self.max_gradient_norm = norm;
+        self.base = self.base.with_max_gradient_norm(norm);
+        self
+    }
+    pub fn with_loss_sync_freq(mut self, freq: usize) -> Self {
+        self.base = self.base.with_loss_sync_freq(freq);
+        self
+    }
+    pub fn with_warmup_steps(mut self, steps: usize) -> Self {
+        self.base = self.base.with_warmup_steps(steps);
+        self
+    }
+    pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
+        self.base = self.base.with_warmup_batch_size(size);
         self
     }
     pub fn with_bandit_loss_weight(mut self, weight: f32) -> Self {
         self.bandit_loss_weight = weight;
         self
     }
-    pub fn with_warmup_steps(mut self, steps: usize) -> Self {
-        self.warmup_steps = steps;
-        self
-    }
-    pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
-        self.warmup_batch_size = size;
-        self
-    }
 
     /// Validate configuration
     pub fn validate(&self) -> Result<(), String> {
-        if self.gamma <= 0.0 || self.gamma > 1.0 {
-            return Err("gamma must be in (0, 1]".to_string());
-        }
-        if self.epsilon_start < 0.0 || self.epsilon_start > 1.0 {
-            return Err("epsilon_start must be in [0, 1]".to_string());
-        }
-        if self.epsilon_end < 0.0 || self.epsilon_end > 1.0 {
-            return Err("epsilon_end must be in [0, 1]".to_string());
-        }
-        if self.epsilon_end > self.epsilon_start {
-            return Err("epsilon_end must be <= epsilon_start".to_string());
-        }
-        if self.epsilon_decay <= 0.0 || self.epsilon_decay > 1.0 {
-            return Err("epsilon_decay must be in (0, 1]".to_string());
-        }
-        if self.learning_rate <= 0.0 {
-            return Err("learning_rate must be > 0".to_string());
-        }
-        if self.batch_size == 0 {
-            return Err("batch_size must be > 0".to_string());
-        }
-        if self.buffer_capacity == 0 {
-            return Err("buffer_capacity must be > 0".to_string());
-        }
-        if self.max_gradient_norm <= 0.0 {
-            return Err("max_gradient_norm must be > 0".to_string());
-        }
+        self.base.validate()?;
         if self.bandit_loss_weight < 0.0 {
             return Err("bandit_loss_weight must be >= 0".to_string());
         }
-
-        // Warn about non-warp-aligned batch size
-        if !self.is_batch_size_warp_aligned() {
-            log::warn!(
-                "[STAGE:WARN] batch_size {} is not warp-aligned (not a multiple of 32). \
-                 Consider using {} for better GPU utilization. \
-                 Warp alignment reduces wasted GPU cycles.",
-                self.batch_size,
-                self.align_batch_size_to_warp()
-            );
-        }
-
         Ok(())
     }
 }
@@ -215,13 +139,13 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
         config.validate()?;
 
         let target_model = model.clone();
-        let buffer = GpuRingBuffer::new(config.buffer_capacity, state_dim, &device);
+        let buffer = GpuRingBuffer::new(config.buffer_capacity(), state_dim, &device);
 
         let optimizer = AdamConfig::new()
             .with_beta_1(0.9)
             .with_beta_2(0.999)
             .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.max_gradient_norm)))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.max_gradient_norm())))
             .init();
 
         Ok(Self {
@@ -230,7 +154,7 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
             buffer,
             config: config.clone(),
             step_count: 0,
-            epsilon: config.epsilon_start,
+            epsilon: config.epsilon_start(),
             device: device.clone(),
             optimizer,
             accumulated_loss: Tensor::<B, 1>::zeros([1], &device),
@@ -243,9 +167,9 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
     /// Get effective batch size (handles warmup)
     fn effective_batch_size(&self) -> usize {
         if self.warmup_complete {
-            self.config.batch_size
+            self.config.batch_size()
         } else {
-            self.config.warmup_batch_size.min(self.config.batch_size)
+            self.config.warmup_batch_size().min(self.config.batch_size())
         }
     }
 
@@ -287,11 +211,11 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
     /// Execute one Metis training step
     pub fn train_step(&mut self) -> Option<f32> {
         // Check warmup completion
-        if !self.warmup_complete && self.step_count >= self.config.warmup_steps {
+        if !self.warmup_complete && self.step_count >= self.config.warmup_steps() {
             self.warmup_complete = true;
             log::info!(
                 "Warmup complete! Using full batch size: {}",
-                self.config.batch_size
+                self.config.batch_size()
             );
         }
 
@@ -326,7 +250,7 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
 
         // 7. Compute TD target
         let target_q =
-            loss::compute_td_target(&batch.rewards, &max_next_q, &batch.dones, self.config.gamma);
+            loss::compute_td_target(&batch.rewards, &max_next_q, &batch.dones, self.config.gamma());
 
         // 8. Compute DQN loss
         let dqn_loss = loss::compute_double_dqn_loss(&current_q, &target_q);
@@ -340,23 +264,23 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
 
         self.model =
             self.optimizer
-                .step(self.config.learning_rate, self.model.clone(), grads_params);
+                .step(self.config.learning_rate(), self.model.clone(), grads_params);
 
         // 11. Update step count
         self.step_count += 1;
 
         // 12. Update target network periodically
-        if self.config.target_update_freq > 0
+        if self.config.target_update_freq() > 0
             && self.step_count > 0
             && self
                 .step_count
-                .is_multiple_of(self.config.target_update_freq)
+                .is_multiple_of(self.config.target_update_freq())
         {
             self.target_model = self.model.clone();
         }
 
         // 13. Decay epsilon
-        self.epsilon = (self.epsilon * self.config.epsilon_decay).max(self.config.epsilon_end);
+        self.epsilon = (self.epsilon * self.config.epsilon_decay()).max(self.config.epsilon_end());
 
         // 14. Accumulate loss on GPU (no sync!)
         self.accumulated_loss = self.accumulated_loss.clone() + joint_loss.detach();
@@ -418,15 +342,15 @@ mod tests {
     #[test]
     fn test_metis_config_defaults() {
         let config = MetisTrainerConfig::default();
-        assert!((config.gamma - 0.99).abs() < 1e-6);
-        assert!((config.epsilon_start - 1.0).abs() < 1e-6);
-        assert!((config.epsilon_end - 0.01).abs() < 1e-6);
-        assert!((config.epsilon_decay - 0.995).abs() < 1e-6);
-        assert!((config.learning_rate - 0.0001).abs() < 1e-6);
-        assert_eq!(config.batch_size, 2048);
-        assert_eq!(config.buffer_capacity, 100_000);
-        assert_eq!(config.target_update_freq, 1000);
-        assert!((config.max_gradient_norm - 1.0).abs() < 1e-6);
+        assert!((config.gamma() - 0.99).abs() < 1e-6);
+        assert!((config.epsilon_start() - 1.0).abs() < 1e-6);
+        assert!((config.epsilon_end() - 0.01).abs() < 1e-6);
+        assert!((config.epsilon_decay() - 0.995).abs() < 1e-6);
+        assert!((config.learning_rate() - 0.0001).abs() < 1e-6);
+        assert_eq!(config.batch_size(), 2048);
+        assert_eq!(config.buffer_capacity(), 100_000);
+        assert_eq!(config.target_update_freq(), 1000);
+        assert!((config.max_gradient_norm() - 1.0).abs() < 1e-6);
         assert!((config.bandit_loss_weight - 0.5).abs() < 1e-6);
     }
 
@@ -466,8 +390,8 @@ mod tests {
     #[test]
     fn test_warmup_config_defaults() {
         let config = MetisTrainerConfig::default();
-        assert_eq!(config.warmup_steps, 1000);
-        assert_eq!(config.warmup_batch_size, 256);
+        assert_eq!(config.warmup_steps(), 1000);
+        assert_eq!(config.warmup_batch_size(), 256);
     }
 
     #[test]
@@ -485,17 +409,17 @@ mod tests {
             .with_warmup_steps(500)
             .with_warmup_batch_size(128);
 
-        assert!((config.gamma - 0.95).abs() < 1e-6);
-        assert!((config.epsilon_start - 0.9).abs() < 1e-6);
-        assert!((config.epsilon_end - 0.05).abs() < 1e-6);
-        assert!((config.learning_rate - 0.001).abs() < 1e-6);
-        assert_eq!(config.batch_size, 1024);
-        assert_eq!(config.buffer_capacity, 50_000);
-        assert_eq!(config.target_update_freq, 500);
-        assert!((config.max_gradient_norm - 0.5).abs() < 1e-6);
+        assert!((config.gamma() - 0.95).abs() < 1e-6);
+        assert!((config.epsilon_start() - 0.9).abs() < 1e-6);
+        assert!((config.epsilon_end() - 0.05).abs() < 1e-6);
+        assert!((config.learning_rate() - 0.001).abs() < 1e-6);
+        assert_eq!(config.batch_size(), 1024);
+        assert_eq!(config.buffer_capacity(), 50_000);
+        assert_eq!(config.target_update_freq(), 500);
+        assert!((config.max_gradient_norm() - 0.5).abs() < 1e-6);
         assert!((config.bandit_loss_weight - 0.75).abs() < 1e-6);
-        assert_eq!(config.warmup_steps, 500);
-        assert_eq!(config.warmup_batch_size, 128);
+        assert_eq!(config.warmup_steps(), 500);
+        assert_eq!(config.warmup_batch_size(), 128);
     }
 
     #[test]
@@ -513,10 +437,10 @@ mod tests {
     #[test]
     fn test_effective_batch_size_during_warmup() {
         let device = <TestBackend as burn::tensor::backend::Backend>::Device::default();
-        let mut config = MetisTrainerConfig::default();
-        config.batch_size = 2048;
-        config.warmup_batch_size = 256;
-        config.warmup_steps = 100;
+        let config = MetisTrainerConfig::default()
+            .with_batch_size(2048)
+            .with_warmup_batch_size(256)
+            .with_warmup_steps(100);
         let model = CombinedModel::new(
             crate::models::CombinedModelConfig::new(10, vec![16], 8, vec![32], 4),
             &device,
@@ -528,10 +452,10 @@ mod tests {
     #[test]
     fn test_effective_batch_size_after_warmup() {
         let device = <TestBackend as burn::tensor::backend::Backend>::Device::default();
-        let mut config = MetisTrainerConfig::default();
-        config.batch_size = 2048;
-        config.warmup_batch_size = 256;
-        config.warmup_steps = 100;
+        let config = MetisTrainerConfig::default()
+            .with_batch_size(2048)
+            .with_warmup_batch_size(256)
+            .with_warmup_steps(100);
         let model = CombinedModel::new(
             crate::models::CombinedModelConfig::new(10, vec![16], 8, vec![32], 4),
             &device,
