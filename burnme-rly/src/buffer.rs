@@ -258,6 +258,60 @@ impl<B: Backend> TensorTransitionBatch<B> {
     }
 }
 
+/// Core ring buffer state: manages head pointer, size, and capacity.
+/// Composed by CpuRingBuffer, HybridRingBuffer, and GpuRingBuffer.
+#[derive(Debug, Clone)]
+pub struct RingBufferCore {
+    head: usize,
+    size: usize,
+    capacity: usize,
+}
+
+impl RingBufferCore {
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "RingBufferCore capacity must be > 0");
+        Self {
+            head: 0,
+            size: 0,
+            capacity,
+        }
+    }
+
+    pub fn advance(&mut self) {
+        self.head = (self.head + 1) % self.capacity;
+        self.size = (self.size + 1).min(self.capacity);
+    }
+
+    pub fn advance_by(&mut self, count: usize) {
+        self.head = (self.head + count) % self.capacity;
+        self.size = (self.size + count).min(self.capacity);
+    }
+
+    pub fn head(&self) -> usize {
+        self.head
+    }
+    pub fn len(&self) -> usize {
+        self.size
+    }
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+    pub fn is_full(&self) -> bool {
+        self.size == self.capacity
+    }
+    pub fn can_sample(&self, batch_size: usize) -> bool {
+        self.size >= batch_size
+    }
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn reset(&mut self) {
+        self.head = 0;
+        self.size = 0;
+    }
+}
+
 /// CPU-side ring buffer for experience replay.
 ///
 /// Stores `Transition` structs on CPU, converts to GPU tensors at training time.
@@ -303,12 +357,8 @@ impl<B: Backend> TensorTransitionBatch<B> {
 pub struct CpuRingBuffer {
     /// Storage vector (pre-allocated to capacity)
     storage: Vec<Transition>,
-    /// Head index for circular writes
-    head: usize,
-    /// Current number of stored transitions
-    size: usize,
-    /// Maximum capacity
-    capacity: usize,
+    /// Core ring buffer state (head, size, capacity)
+    core: RingBufferCore,
 }
 
 impl CpuRingBuffer {
@@ -331,9 +381,7 @@ impl CpuRingBuffer {
         assert!(capacity > 0, "CpuRingBuffer capacity must be > 0");
         Self {
             storage: Vec::with_capacity(capacity),
-            head: 0,
-            size: 0,
-            capacity,
+            core: RingBufferCore::new(capacity),
         }
     }
 
@@ -374,14 +422,13 @@ impl CpuRingBuffer {
     /// assert_eq!(buffer.len(), 100);
     /// ```
     pub fn push(&mut self, transition: Transition) {
-        if self.storage.len() < self.capacity {
+        if self.storage.len() < self.core.capacity() {
             self.storage.push(transition);
         } else {
-            self.storage[self.head] = transition;
+            self.storage[self.core.head()] = transition;
         }
 
-        self.head = (self.head + 1) % self.capacity;
-        self.size = (self.size + 1).min(self.capacity);
+        self.core.advance();
     }
 
     /// Push a batch of transitions efficiently.
@@ -480,13 +527,13 @@ impl CpuRingBuffer {
     /// assert!(empty.sample(10).is_none());
     /// ```
     pub fn sample(&self, batch_size: usize) -> Option<Vec<Transition>> {
-        if self.size < batch_size {
+        if self.core.len() < batch_size {
             return None;
         }
 
         let mut rng = rng();
         let indices: Vec<usize> = (0..batch_size)
-            .map(|_| rng.random_range(0..self.size))
+            .map(|_| rng.random_range(0..self.core.len()))
             .collect();
 
         Some(indices.iter().map(|&i| self.storage[i].clone()).collect())
@@ -532,12 +579,12 @@ impl CpuRingBuffer {
         batch_size: usize,
         rng: &mut R,
     ) -> Option<Vec<Transition>> {
-        if self.size < batch_size {
+        if self.core.len() < batch_size {
             return None;
         }
 
         let indices: Vec<usize> = (0..batch_size)
-            .map(|_| rng.random_range(0..self.size))
+            .map(|_| rng.random_range(0..self.core.len()))
             .collect();
 
         Some(indices.iter().map(|&i| self.storage[i].clone()).collect())
@@ -545,12 +592,12 @@ impl CpuRingBuffer {
 
     /// Get current number of transitions stored.
     pub fn len(&self) -> usize {
-        self.size
+        self.core.len()
     }
 
     /// Check if buffer is empty.
     pub fn is_empty(&self) -> bool {
-        self.size == 0
+        self.core.is_empty()
     }
 
     /// Check if buffer has enough samples for a batch.
@@ -561,28 +608,27 @@ impl CpuRingBuffer {
     ///
     /// # Returns
     ///
-    /// `true` if `self.size >= batch_size`
+    /// `true` if `self.core.len() >= batch_size`
     pub fn can_sample(&self, batch_size: usize) -> bool {
-        self.size >= batch_size
+        self.core.can_sample(batch_size)
     }
 
     /// Get maximum capacity.
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.core.capacity()
     }
 
     /// Check if buffer is full.
     pub fn is_full(&self) -> bool {
-        self.size == self.capacity
+        self.core.is_full()
     }
 
     /// Clear all transitions from the buffer.
     ///
     /// Resets size and head to 0, clears storage vector.
     pub fn clear(&mut self) {
+        self.core.reset();
         self.storage.clear();
-        self.head = 0;
-        self.size = 0;
     }
 
     /// Fill the buffer with random transitions for warmup initialization.
@@ -603,7 +649,7 @@ impl CpuRingBuffer {
     pub fn fill_random(&mut self, num_transitions: usize, action_dim: usize, state_dim: usize) {
         use rand::RngExt;
         let mut rng = rand::rng();
-        let count = num_transitions.min(self.capacity - self.size);
+        let count = num_transitions.min(self.core.capacity() - self.core.len());
         for _ in 0..count {
             let state: Vec<f32> = (0..state_dim)
                 .map(|_| rng.random_range(-1.0..1.0))
@@ -625,7 +671,84 @@ impl CpuRingBuffer {
 
 impl Default for CpuRingBuffer {
     fn default() -> Self {
-        Self::new(100_000) // Default: 100k capacity
+        Self::new(100_000)
+    }
+}
+
+#[cfg(test)]
+mod ring_core_tests {
+    use super::RingBufferCore;
+
+    #[test]
+    fn test_new() {
+        let core = RingBufferCore::new(100);
+        assert_eq!(core.head(), 0);
+        assert_eq!(core.len(), 0);
+        assert_eq!(core.capacity(), 100);
+        assert!(core.is_empty());
+        assert!(!core.is_full());
+    }
+
+    #[test]
+    fn test_advance() {
+        let mut core = RingBufferCore::new(10);
+        for i in 1..=5 {
+            core.advance();
+            assert_eq!(core.len(), i);
+            assert_eq!(core.head(), i % 10);
+        }
+    }
+
+    #[test]
+    fn test_advance_wraps() {
+        let mut core = RingBufferCore::new(3);
+        core.advance(); // head=1, size=1
+        core.advance(); // head=2, size=2
+        core.advance(); // head=0, size=3
+        assert_eq!(core.head(), 0);
+        assert_eq!(core.len(), 3);
+        core.advance(); // head=1, size=3 (capped)
+        assert_eq!(core.head(), 1);
+        assert_eq!(core.len(), 3);
+    }
+
+    #[test]
+    fn test_advance_by() {
+        let mut core = RingBufferCore::new(100);
+        core.advance_by(5);
+        assert_eq!(core.head(), 5);
+        assert_eq!(core.len(), 5);
+        core.advance_by(3);
+        assert_eq!(core.head(), 8);
+        assert_eq!(core.len(), 8);
+    }
+
+    #[test]
+    fn test_advance_by_wrap_and_cap() {
+        let mut core = RingBufferCore::new(10);
+        core.advance_by(8);
+        core.advance_by(5);
+        assert_eq!(core.head(), 3); // (8+5)%10
+        assert_eq!(core.len(), 10); // capped
+    }
+
+    #[test]
+    fn test_can_sample() {
+        let mut core = RingBufferCore::new(10);
+        assert!(!core.can_sample(1));
+        core.advance_by(5);
+        assert!(core.can_sample(5));
+        assert!(!core.can_sample(6));
+    }
+
+    #[test]
+    fn test_reset() {
+        let mut core = RingBufferCore::new(10);
+        core.advance_by(5);
+        core.reset();
+        assert_eq!(core.head(), 0);
+        assert_eq!(core.len(), 0);
+        assert!(core.is_empty());
     }
 }
 
@@ -666,9 +789,7 @@ pub struct HybridRingBuffer<B: Backend> {
     next_states: Vec<Vec<f32>>,
     dones: Vec<bool>,
 
-    head: usize,
-    size: usize,
-    capacity: usize,
+    core: RingBufferCore,
     state_dim: usize,
     _phantom: std::marker::PhantomData<B>,
 }
@@ -682,9 +803,7 @@ impl<B: Backend> HybridRingBuffer<B> {
             rewards: Vec::with_capacity(capacity),
             next_states: Vec::with_capacity(capacity),
             dones: Vec::with_capacity(capacity),
-            head: 0,
-            size: 0,
-            capacity,
+            core: RingBufferCore::new(capacity),
             state_dim,
             _phantom: std::marker::PhantomData,
         }
@@ -699,21 +818,20 @@ impl<B: Backend> HybridRingBuffer<B> {
         next_state: Vec<f32>,
         done: bool,
     ) {
-        if self.states.len() < self.capacity {
+        if self.states.len() < self.core.capacity() {
             self.states.push(state);
             self.actions.push(action);
             self.rewards.push(reward);
             self.next_states.push(next_state);
             self.dones.push(done);
         } else {
-            self.states[self.head] = state;
-            self.actions[self.head] = action;
-            self.rewards[self.head] = reward;
-            self.next_states[self.head] = next_state;
-            self.dones[self.head] = done;
+            self.states[self.core.head()] = state;
+            self.actions[self.core.head()] = action;
+            self.rewards[self.core.head()] = reward;
+            self.next_states[self.core.head()] = next_state;
+            self.dones[self.core.head()] = done;
         }
-        self.head = (self.head + 1) % self.capacity;
-        self.size = (self.size + 1).min(self.capacity);
+        self.core.advance();
     }
 
     /// Push a batch of transitions efficiently.
@@ -819,13 +937,13 @@ impl<B: Backend> HybridRingBuffer<B> {
     /// assert!(empty.sample(10).is_none());
     /// ```
     pub fn sample(&self, batch_size: usize) -> Option<Vec<Transition>> {
-        if self.size < batch_size {
+        if self.core.len() < batch_size {
             return None;
         }
 
         let mut rng = rng();
         let indices: Vec<usize> = (0..batch_size)
-            .map(|_| rng.random_range(0..self.size))
+            .map(|_| rng.random_range(0..self.core.len()))
             .collect();
 
         Some(
@@ -853,13 +971,13 @@ impl<B: Backend> HybridRingBuffer<B> {
         batch_size: usize,
         device: &B::Device,
     ) -> Option<TensorTransitionBatch<B>> {
-        if self.size < batch_size {
+        if self.core.len() < batch_size {
             return None;
         }
 
         use rand::prelude::IteratorRandom;
         let mut rng = rand::rng();
-        let indices: Vec<usize> = (0..self.size).sample(&mut rng, batch_size);
+        let indices: Vec<usize> = (0..self.core.len()).sample(&mut rng, batch_size);
         if indices.len() < batch_size {
             return None;
         }
@@ -912,22 +1030,22 @@ impl<B: Backend> HybridRingBuffer<B> {
 
     /// Get buffer length.
     pub fn len(&self) -> usize {
-        self.size
+        self.core.len()
     }
 
     /// Check if buffer is empty.
     pub fn is_empty(&self) -> bool {
-        self.size == 0
+        self.core.is_empty()
     }
 
     /// Get buffer capacity.
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.core.capacity()
     }
 
     /// Check if buffer is full.
     pub fn is_full(&self) -> bool {
-        self.size == self.capacity
+        self.core.is_full()
     }
 
     /// Get state dimension.
@@ -937,13 +1055,12 @@ impl<B: Backend> HybridRingBuffer<B> {
 
     /// Check if we have enough samples.
     pub fn can_sample(&self, batch_size: usize) -> bool {
-        self.size >= batch_size
+        self.core.can_sample(batch_size)
     }
 
     /// Clear the buffer.
     pub fn clear(&mut self) {
-        self.head = 0;
-        self.size = 0;
+        self.core.reset();
         self.states.clear();
         self.actions.clear();
         self.rewards.clear();
@@ -969,7 +1086,7 @@ impl<B: Backend> HybridRingBuffer<B> {
     pub fn fill_random(&mut self, num_transitions: usize, action_dim: usize, state_dim: usize) {
         use rand::RngExt;
         let mut rng = rand::rng();
-        let count = num_transitions.min(self.capacity - self.size);
+        let count = num_transitions.min(self.core.capacity() - self.core.len());
         for _ in 0..count {
             let state: Vec<f32> = (0..state_dim)
                 .map(|_| rng.random_range(-1.0..1.0))
@@ -997,9 +1114,7 @@ impl<B: Backend> Clone for HybridRingBuffer<B> {
             rewards: self.rewards.clone(),
             next_states: self.next_states.clone(),
             dones: self.dones.clone(),
-            head: self.head,
-            size: self.size,
-            capacity: self.capacity,
+            core: self.core.clone(),
             state_dim: self.state_dim,
             _phantom: std::marker::PhantomData,
         }
@@ -1009,10 +1124,10 @@ impl<B: Backend> Clone for HybridRingBuffer<B> {
 impl<B: Backend> std::fmt::Debug for HybridRingBuffer<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HybridRingBuffer")
-            .field("capacity", &self.capacity)
-            .field("size", &self.size)
+            .field("capacity", &self.core.capacity())
+            .field("len", &self.core.len())
             .field("state_dim", &self.state_dim)
-            .field("head", &self.head)
+            .field("head", &self.core.head())
             .finish_non_exhaustive()
     }
 }

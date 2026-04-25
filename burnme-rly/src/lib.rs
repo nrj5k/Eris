@@ -49,8 +49,8 @@ pub mod warmup;
 
 // Re-export main types for convenient use
 pub use buffer::{
-    CpuRingBuffer, GpuRingBuffer, GpuTransitionBatch, HybridRingBuffer, TensorTransitionBatch,
-    Transition,
+    CpuRingBuffer, GpuRingBuffer, GpuTransitionBatch, HybridRingBuffer, RingBufferCore,
+    TensorTransitionBatch, Transition,
 };
 pub use checkpoint::{
     load_checkpoint, save_checkpoint, CheckpointMetadata, CheckpointMetadataExt, Checkpointable,
