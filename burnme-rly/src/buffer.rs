@@ -1177,12 +1177,8 @@ pub struct GpuRingBuffer<B: Backend> {
     rewards: Option<Tensor<B, 1>>,
     /// Dones tensor [capacity] on GPU (bool as f32: 1.0=true, 0.0=false)
     dones: Option<Tensor<B, 1>>,
-    /// Maximum capacity
-    capacity: usize,
-    /// Write head position
-    write_head: usize,
-    /// Current number of transitions stored
-    len: usize,
+    /// Core ring buffer state (head, size, capacity)
+    core: RingBufferCore,
     /// State dimension
     state_dim: usize,
     /// Device (stored to ensure same device for all ops)
@@ -1247,9 +1243,7 @@ impl<B: Backend> GpuRingBuffer<B> {
             actions: None,
             rewards: None,
             dones: None,
-            capacity,
-            write_head: 0,
-            len: 0,
+            core: RingBufferCore::new(capacity),
             state_dim,
             device: device.clone(),
         }
@@ -1320,7 +1314,7 @@ impl<B: Backend> GpuRingBuffer<B> {
         }
 
         // Get the index to write to
-        let idx = self.write_head;
+        let idx = self.core.head();
 
         // Use slice_assign to write at specific index
         // states[idx] = state
@@ -1362,9 +1356,8 @@ impl<B: Backend> GpuRingBuffer<B> {
             .take()
             .map(|d| d.slice_assign(idx..idx + 1, done_tensor));
 
-        // Update pointers
-        self.write_head = (self.write_head + 1) % self.capacity;
-        self.len = (self.len + 1).min(self.capacity);
+        // Update ring buffer state
+        self.core.advance();
     }
 
     /// Push a batch of transitions efficiently.
@@ -1422,8 +1415,8 @@ impl<B: Backend> GpuRingBuffer<B> {
         }
 
         // Handle wrap-around by splitting into chunks
-        let start_idx = self.write_head;
-        let end_idx = (start_idx + batch_size).min(self.capacity);
+        let start_idx = self.core.head();
+        let end_idx = (start_idx + batch_size).min(self.core.capacity());
         let first_chunk = end_idx - start_idx;
 
         // Push first chunk
@@ -1457,8 +1450,7 @@ impl<B: Backend> GpuRingBuffer<B> {
                 .take()
                 .map(|d| d.slice_assign(start_idx..end_idx, dones.clone().slice(0..first_chunk)));
 
-            self.write_head = end_idx % self.capacity;
-            self.len = (self.len + first_chunk).min(self.capacity);
+            self.core.advance_by(first_chunk);
         }
 
         // Handle wrap-around if needed
@@ -1525,14 +1517,14 @@ impl<B: Backend> GpuRingBuffer<B> {
     /// }
     /// ```
     pub fn sample(&self, batch_size: usize) -> Option<GpuTransitionBatch<B>> {
-        if self.len < batch_size {
+        if self.core.len() < batch_size {
             return None;
         }
 
         // Generate random indices on CPU for proper integer uniform distribution
         let mut rng = rng();
         let indices: Vec<i32> = (0..batch_size)
-            .map(|_| rng.random_range(0..self.len) as i32)
+            .map(|_| rng.random_range(0..self.core.len()) as i32)
             .collect();
         let indices_data = TensorData::new(indices, [batch_size]);
         let indices_tensor =
@@ -1612,13 +1604,13 @@ impl<B: Backend> GpuRingBuffer<B> {
         batch_size: usize,
         rng: &mut R,
     ) -> Option<GpuTransitionBatch<B>> {
-        if self.len < batch_size {
+        if self.core.len() < batch_size {
             return None;
         }
 
         // Generate indices with provided RNG
         let indices: Vec<i32> = (0..batch_size)
-            .map(|_| rng.random_range(0..self.len) as i32)
+            .map(|_| rng.random_range(0..self.core.len()) as i32)
             .collect();
 
         // Create indices tensor
@@ -1661,70 +1653,75 @@ impl<B: Backend> GpuRingBuffer<B> {
 
     /// Get current number of transitions
     pub fn len(&self) -> usize {
-        self.len
+        self.core.len()
     }
 
     /// Check if empty
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.core.is_empty()
     }
 
     /// Check if can sample
     pub fn can_sample(&self, batch_size: usize) -> bool {
-        self.len >= batch_size
+        self.core.can_sample(batch_size)
     }
 
     /// Get capacity
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.core.capacity()
     }
 
     /// Check if full
     pub fn is_full(&self) -> bool {
-        self.len == self.capacity
+        self.core.is_full()
     }
 
     /// Clear all transitions.
     ///
     /// Note: We keep the allocated tensors, just reset counters.
     pub fn clear(&mut self) {
-        self.len = 0;
-        self.write_head = 0;
+        self.core.reset();
 
         // Zero out tensor data to prevent stale data
         if let Some(ref mut s) = self.states {
-            *s = Tensor::<B, 2>::zeros([self.capacity, self.state_dim], &self.device);
+            *s = Tensor::<B, 2>::zeros([self.core.capacity(), self.state_dim], &self.device);
         }
         if let Some(ref mut ns) = self.next_states {
-            *ns = Tensor::<B, 2>::zeros([self.capacity, self.state_dim], &self.device);
+            *ns = Tensor::<B, 2>::zeros([self.core.capacity(), self.state_dim], &self.device);
         }
         if let Some(ref mut a) = self.actions {
-            *a = Tensor::<B, 1, Int>::zeros([self.capacity], &self.device);
+            *a = Tensor::<B, 1, Int>::zeros([self.core.capacity()], &self.device);
         }
         if let Some(ref mut r) = self.rewards {
-            *r = Tensor::<B, 1>::zeros([self.capacity], &self.device);
+            *r = Tensor::<B, 1>::zeros([self.core.capacity()], &self.device);
         }
         if let Some(ref mut d) = self.dones {
-            *d = Tensor::<B, 1>::zeros([self.capacity], &self.device);
+            *d = Tensor::<B, 1>::zeros([self.core.capacity()], &self.device);
         }
     }
 
     /// Allocate GPU tensors (called lazily on first push)
     fn allocate_buffers(&mut self) {
-        self.states = Some(Tensor::zeros([self.capacity, self.state_dim], &self.device));
-        self.next_states = Some(Tensor::zeros([self.capacity, self.state_dim], &self.device));
-        self.actions = Some(Tensor::zeros([self.capacity], &self.device));
-        self.rewards = Some(Tensor::zeros([self.capacity], &self.device));
-        self.dones = Some(Tensor::zeros([self.capacity], &self.device));
+        self.states = Some(Tensor::zeros(
+            [self.core.capacity(), self.state_dim],
+            &self.device,
+        ));
+        self.next_states = Some(Tensor::zeros(
+            [self.core.capacity(), self.state_dim],
+            &self.device,
+        ));
+        self.actions = Some(Tensor::zeros([self.core.capacity()], &self.device));
+        self.rewards = Some(Tensor::zeros([self.core.capacity()], &self.device));
+        self.dones = Some(Tensor::zeros([self.core.capacity()], &self.device));
     }
 }
 
 impl<B: Backend> std::fmt::Debug for GpuRingBuffer<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GpuRingBuffer")
-            .field("capacity", &self.capacity)
-            .field("len", &self.len)
-            .field("write_head", &self.write_head)
+            .field("capacity", &self.core.capacity())
+            .field("len", &self.core.len())
+            .field("write_head", &self.core.head())
             .field("state_dim", &self.state_dim)
             .finish_non_exhaustive()
     }
