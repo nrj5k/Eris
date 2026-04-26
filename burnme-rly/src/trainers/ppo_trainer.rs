@@ -3,9 +3,8 @@
 //! Implements PPO with clipped surrogate loss for stable policy optimization.
 //! Uses on-policy learning with a rollout buffer instead of experience replay.
 
-use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::adaptor::OptimizerAdaptor;
-use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
+use burn::optim::{Adam, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Tensor;
 
@@ -200,14 +199,7 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
         let model = PpoModel::new(model_config, &device);
         let old_model = model.clone(); // Start with identical copy
 
-        let optimizer = AdamConfig::new()
-            .with_beta_1(0.9)
-            .with_beta_2(0.999)
-            .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(
-                config.base.max_gradient_norm,
-            )))
-            .init();
+        let optimizer = config.base.build_adam::<PpoModel<B>, B>();
 
         Ok(Self {
             model,

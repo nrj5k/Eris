@@ -1,3 +1,7 @@
+use burn::grad_clipping::GradientClippingConfig;
+use burn::optim::AdamConfig;
+use burn::tensor::backend::AutodiffBackend;
+
 /// Base configuration struct shared by all RL trainers
 #[derive(Debug, Clone)]
 pub struct TrainerConfigBase {
@@ -93,6 +97,18 @@ impl TrainerConfigBase {
     pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
         self.warmup_batch_size = size;
         self
+    }
+
+    /// Build Adam optimizer with standard RL hyperparameters.
+    pub fn build_adam<M: burn::module::AutodiffModule<B>, B: AutodiffBackend>(
+        &self,
+    ) -> burn::optim::adaptor::OptimizerAdaptor<burn::optim::Adam, M, B> {
+        AdamConfig::new()
+            .with_beta_1(0.9)
+            .with_beta_2(0.999)
+            .with_epsilon(1e-8)
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(self.max_gradient_norm)))
+            .init()
     }
 }
 

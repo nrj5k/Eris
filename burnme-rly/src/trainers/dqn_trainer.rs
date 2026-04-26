@@ -1,7 +1,6 @@
-use burn::grad_clipping::GradientClippingConfig;
 use burn::module::AutodiffModule;
 use burn::optim::adaptor::OptimizerAdaptor;
-use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
+use burn::optim::{Adam, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor};
 
@@ -41,56 +40,104 @@ impl Default for DQNTrainerConfig {
 }
 
 impl TrainerConfig for DQNTrainerConfig {
-    fn gamma(&self) -> f32 { self.base.gamma }
-    fn epsilon_start(&self) -> f32 { self.base.epsilon_start }
-    fn epsilon_end(&self) -> f32 { self.base.epsilon_end }
-    fn epsilon_decay(&self) -> f32 { self.base.epsilon_decay }
-    fn learning_rate(&self) -> f64 { self.base.learning_rate }
-    fn batch_size(&self) -> usize { self.base.batch_size }
-    fn buffer_capacity(&self) -> usize { self.base.buffer_capacity }
-    fn target_update_freq(&self) -> usize { self.base.target_update_freq }
-    fn max_gradient_norm(&self) -> f32 { self.base.max_gradient_norm }
-    fn loss_sync_freq(&self) -> usize { self.base.loss_sync_freq }
-    fn warmup_steps(&self) -> usize { self.base.warmup_steps }
-    fn warmup_batch_size(&self) -> usize { self.base.warmup_batch_size }
+    fn gamma(&self) -> f32 {
+        self.base.gamma
+    }
+    fn epsilon_start(&self) -> f32 {
+        self.base.epsilon_start
+    }
+    fn epsilon_end(&self) -> f32 {
+        self.base.epsilon_end
+    }
+    fn epsilon_decay(&self) -> f32 {
+        self.base.epsilon_decay
+    }
+    fn learning_rate(&self) -> f64 {
+        self.base.learning_rate
+    }
+    fn batch_size(&self) -> usize {
+        self.base.batch_size
+    }
+    fn buffer_capacity(&self) -> usize {
+        self.base.buffer_capacity
+    }
+    fn target_update_freq(&self) -> usize {
+        self.base.target_update_freq
+    }
+    fn max_gradient_norm(&self) -> f32 {
+        self.base.max_gradient_norm
+    }
+    fn loss_sync_freq(&self) -> usize {
+        self.base.loss_sync_freq
+    }
+    fn warmup_steps(&self) -> usize {
+        self.base.warmup_steps
+    }
+    fn warmup_batch_size(&self) -> usize {
+        self.base.warmup_batch_size
+    }
 }
 
 impl DQNTrainerConfig {
     pub fn with_gamma(self, gamma: f32) -> Self {
-        Self { base: self.base.with_gamma(gamma) }
+        Self {
+            base: self.base.with_gamma(gamma),
+        }
     }
     pub fn with_epsilon_start(self, epsilon: f32) -> Self {
-        Self { base: self.base.with_epsilon_start(epsilon) }
+        Self {
+            base: self.base.with_epsilon_start(epsilon),
+        }
     }
     pub fn with_epsilon_end(self, epsilon: f32) -> Self {
-        Self { base: self.base.with_epsilon_end(epsilon) }
+        Self {
+            base: self.base.with_epsilon_end(epsilon),
+        }
     }
     pub fn with_epsilon_decay(self, decay: f32) -> Self {
-        Self { base: self.base.with_epsilon_decay(decay) }
+        Self {
+            base: self.base.with_epsilon_decay(decay),
+        }
     }
     pub fn with_learning_rate(self, lr: f64) -> Self {
-        Self { base: self.base.with_learning_rate(lr) }
+        Self {
+            base: self.base.with_learning_rate(lr),
+        }
     }
     pub fn with_batch_size(self, size: usize) -> Self {
-        Self { base: self.base.with_batch_size(size) }
+        Self {
+            base: self.base.with_batch_size(size),
+        }
     }
     pub fn with_buffer_capacity(self, cap: usize) -> Self {
-        Self { base: self.base.with_buffer_capacity(cap) }
+        Self {
+            base: self.base.with_buffer_capacity(cap),
+        }
     }
     pub fn with_target_update_freq(self, freq: usize) -> Self {
-        Self { base: self.base.with_target_update_freq(freq) }
+        Self {
+            base: self.base.with_target_update_freq(freq),
+        }
     }
     pub fn with_max_gradient_norm(self, norm: f32) -> Self {
-        Self { base: self.base.with_max_gradient_norm(norm) }
+        Self {
+            base: self.base.with_max_gradient_norm(norm),
+        }
     }
     pub fn with_loss_sync_freq(self, freq: usize) -> Self {
-        Self { base: self.base.with_loss_sync_freq(freq) }
+        Self {
+            base: self.base.with_loss_sync_freq(freq),
+        }
     }
     pub fn with_warmup_steps(self, steps: usize) -> Self {
-        Self { base: self.base.with_warmup_steps(steps) }
+        Self {
+            base: self.base.with_warmup_steps(steps),
+        }
     }
     pub fn with_warmup_batch_size(self, size: usize) -> Self {
-        Self { base: self.base.with_warmup_batch_size(size) }
+        Self {
+            base: self.base.with_warmup_batch_size(size),
+        }
     }
 
     /// Validate configuration
@@ -145,12 +192,7 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
         let target_network = q_network.clone();
         let buffer = GpuRingBuffer::new(config.base.buffer_capacity, state_dim, &device);
 
-        let optimizer = AdamConfig::new()
-            .with_beta_1(0.9)
-            .with_beta_2(0.999)
-            .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.base.max_gradient_norm)))
-            .init();
+        let optimizer = config.base.build_adam::<M, B>();
 
         // Initialize loss accumulator (async loss - Metis optimization)
         let loss_accumulator = LossAccumulator::new(config.base.loss_sync_freq, &device);
@@ -212,7 +254,8 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
 
     /// Decay epsilon
     fn decay_epsilon(&mut self) {
-        self.epsilon = (self.epsilon * self.config.base.epsilon_decay).max(self.config.base.epsilon_end);
+        self.epsilon =
+            (self.epsilon * self.config.base.epsilon_decay).max(self.config.base.epsilon_end);
     }
 
     /// Check if warmup is complete
@@ -226,7 +269,10 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
             self.config.base.batch_size
         } else {
             // During warmup, use smaller batch size
-            self.config.base.warmup_batch_size.min(self.config.base.batch_size)
+            self.config
+                .base
+                .warmup_batch_size
+                .min(self.config.base.batch_size)
         }
     }
 
@@ -280,8 +326,12 @@ impl<B: AutodiffBackend, M: QNetwork<B> + Clone> DQNTrainer<B, M> {
             .detach();
 
         // 7. Compute TD target using loss module
-        let targets =
-            loss::compute_td_target(&batch.rewards, &max_next_q, &batch.dones, self.config.base.gamma);
+        let targets = loss::compute_td_target(
+            &batch.rewards,
+            &max_next_q,
+            &batch.dones,
+            self.config.base.gamma,
+        );
 
         // 8. MSE loss using loss module
         let loss = loss::compute_double_dqn_loss(&current_q, &targets);
