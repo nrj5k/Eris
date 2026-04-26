@@ -199,12 +199,12 @@ pub trait TrainerConfig: Clone {
             return Err(format!("learning_rate must be > 0, got {}", lr));
         }
 
-        // Epsilon validation
+        // Epsilon validation: allow 0 for policy gradient methods (PPO doesn't use epsilon-greedy)
         let eps_start = self.epsilon_start();
         let eps_end = self.epsilon_end();
-        if eps_start <= 0.0 || eps_start > 1.0 {
+        if eps_start < 0.0 || eps_start > 1.0 {
             return Err(format!(
-                "epsilon_start must be in (0, 1], got {}",
+                "epsilon_start must be in [0, 1], got {}",
                 eps_start
             ));
         }
@@ -221,11 +221,9 @@ pub trait TrainerConfig: Clone {
             return Err(format!("max_gradient_norm must be > 0, got {}", max_grad));
         }
 
-        // Target update frequency must be positive
-        let target_freq = self.target_update_freq();
-        if target_freq == 0 {
-            return Err("target_update_freq must be > 0".to_string());
-        }
+        // Target update frequency: 0 is valid (e.g., PPO doesn't use target networks)
+        // Only relevant for DQN-style trainers that use target networks
+        let _target_freq = self.target_update_freq();
 
         // Warmup batch size must be positive
         let warmup_bs = self.warmup_batch_size();

@@ -47,67 +47,109 @@ impl Default for PpoTrainerConfig {
 }
 
 impl TrainerConfig for PpoTrainerConfig {
-    fn gamma(&self) -> f32 { self.base.gamma }
-    fn epsilon_start(&self) -> f32 { 0.0 }
-    fn epsilon_end(&self) -> f32 { 0.0 }
-    fn epsilon_decay(&self) -> f32 { 1.0 }
-    fn learning_rate(&self) -> f64 { self.base.learning_rate }
-    fn batch_size(&self) -> usize { self.base.batch_size }
-    fn buffer_capacity(&self) -> usize { self.base.buffer_capacity }
-    fn target_update_freq(&self) -> usize { 0 }
-    fn max_gradient_norm(&self) -> f32 { self.base.max_gradient_norm }
-    fn loss_sync_freq(&self) -> usize { self.base.loss_sync_freq }
-    fn warmup_steps(&self) -> usize { self.base.warmup_steps }
-    fn warmup_batch_size(&self) -> usize { self.base.warmup_batch_size }
+    fn gamma(&self) -> f32 {
+        self.base.gamma
+    }
+    fn epsilon_start(&self) -> f32 {
+        0.0
+    }
+    fn epsilon_end(&self) -> f32 {
+        0.0
+    }
+    fn epsilon_decay(&self) -> f32 {
+        1.0
+    }
+    fn learning_rate(&self) -> f64 {
+        self.base.learning_rate
+    }
+    fn batch_size(&self) -> usize {
+        self.base.batch_size
+    }
+    fn buffer_capacity(&self) -> usize {
+        self.base.buffer_capacity
+    }
+    fn target_update_freq(&self) -> usize {
+        0
+    }
+    fn max_gradient_norm(&self) -> f32 {
+        self.base.max_gradient_norm
+    }
+    fn loss_sync_freq(&self) -> usize {
+        self.base.loss_sync_freq
+    }
+    fn warmup_steps(&self) -> usize {
+        self.base.warmup_steps
+    }
+    fn warmup_batch_size(&self) -> usize {
+        self.base.warmup_batch_size
+    }
 }
 
 impl PpoTrainerConfig {
     pub fn with_gamma(mut self, gamma: f32) -> Self {
-        self.base = self.base.with_gamma(gamma); self
+        self.base = self.base.with_gamma(gamma);
+        self
     }
     pub fn with_clip_epsilon(mut self, epsilon: f32) -> Self {
-        self.clip_epsilon = epsilon; self
+        self.clip_epsilon = epsilon;
+        self
     }
     pub fn with_value_loss_coef(mut self, coef: f32) -> Self {
-        self.value_loss_coef = coef; self
+        self.value_loss_coef = coef;
+        self
     }
     pub fn with_entropy_coef(mut self, coef: f32) -> Self {
-        self.entropy_coef = coef; self
+        self.entropy_coef = coef;
+        self
     }
     pub fn with_learning_rate(mut self, lr: f64) -> Self {
-        self.base = self.base.with_learning_rate(lr); self
+        self.base = self.base.with_learning_rate(lr);
+        self
     }
     pub fn with_batch_size(mut self, size: usize) -> Self {
-        self.base = self.base.with_batch_size(size); self
+        self.base = self.base.with_batch_size(size);
+        self
     }
     pub fn with_buffer_capacity(mut self, cap: usize) -> Self {
-        self.base = self.base.with_buffer_capacity(cap); self
+        self.base = self.base.with_buffer_capacity(cap);
+        self
     }
     pub fn with_ppo_epochs(mut self, epochs: usize) -> Self {
-        self.ppo_epochs = epochs; self
+        self.ppo_epochs = epochs;
+        self
     }
     pub fn with_max_gradient_norm(mut self, norm: f32) -> Self {
-        self.base = self.base.with_max_gradient_norm(norm); self
+        self.base = self.base.with_max_gradient_norm(norm);
+        self
     }
     pub fn with_gae_lambda(mut self, lambda: f32) -> Self {
-        self.gae_lambda = lambda; self
+        self.gae_lambda = lambda;
+        self
     }
     pub fn with_warmup_steps(mut self, steps: usize) -> Self {
-        self.base = self.base.with_warmup_steps(steps); self
+        self.base = self.base.with_warmup_steps(steps);
+        self
     }
     pub fn with_warmup_batch_size(mut self, size: usize) -> Self {
-        self.base = self.base.with_warmup_batch_size(size); self
+        self.base = self.base.with_warmup_batch_size(size);
+        self
     }
 
     /// Validate configuration
     pub fn validate(&self) -> Result<(), String> {
-        self.base.validate()?;
+        TrainerConfig::validate(self)?;
         if self.clip_epsilon <= 0.0 || self.clip_epsilon >= 1.0 {
             return Err("clip_epsilon must be in (0, 1)".to_string());
         }
-        if self.value_loss_coef < 0.0 { return Err("value_loss_coef must be >= 0".to_string()); }
-        if self.entropy_coef < 0.0 { return Err("entropy_coef must be >= 0".to_string()); }
-        if self.ppo_epochs == 0 { return Err("ppo_epochs must be > 0".to_string()); }
+        if self.value_loss_coef < 0.0 {
+            return Err("value_loss_coef must be >= 0".to_string());
+        }
+        if self.entropy_coef < 0.0 {
+            return Err("entropy_coef must be >= 0".to_string());
+        }
+        if self.ppo_epochs == 0 {
+            return Err("ppo_epochs must be > 0".to_string());
+        }
         if self.gae_lambda <= 0.0 || self.gae_lambda > 1.0 {
             return Err("gae_lambda must be in (0, 1]".to_string());
         }
@@ -162,7 +204,9 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
             .with_beta_1(0.9)
             .with_beta_2(0.999)
             .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.base.max_gradient_norm)))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(
+                config.base.max_gradient_norm,
+            )))
             .init();
 
         Ok(Self {
@@ -284,9 +328,11 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
             let grads_params = GradientsParams::from_grads(grads, &self.model);
 
             // Optimizer step
-            self.model =
-                self.optimizer
-                    .step(self.config.base.learning_rate, self.model.clone(), grads_params);
+            self.model = self.optimizer.step(
+                self.config.base.learning_rate,
+                self.model.clone(),
+                grads_params,
+            );
 
             // Accumulate loss for logging
             let loss_value: f32 = loss.into_data().convert::<f32>().as_slice::<f32>().unwrap()[0];

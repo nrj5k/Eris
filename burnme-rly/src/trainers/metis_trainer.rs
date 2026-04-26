@@ -33,18 +33,42 @@ impl Default for MetisTrainerConfig {
 }
 
 impl TrainerConfig for MetisTrainerConfig {
-    fn gamma(&self) -> f32 { self.base.gamma }
-    fn epsilon_start(&self) -> f32 { self.base.epsilon_start }
-    fn epsilon_end(&self) -> f32 { self.base.epsilon_end }
-    fn epsilon_decay(&self) -> f32 { self.base.epsilon_decay }
-    fn learning_rate(&self) -> f64 { self.base.learning_rate }
-    fn batch_size(&self) -> usize { self.base.batch_size }
-    fn buffer_capacity(&self) -> usize { self.base.buffer_capacity }
-    fn target_update_freq(&self) -> usize { self.base.target_update_freq }
-    fn max_gradient_norm(&self) -> f32 { self.base.max_gradient_norm }
-    fn loss_sync_freq(&self) -> usize { self.base.loss_sync_freq }
-    fn warmup_steps(&self) -> usize { self.base.warmup_steps }
-    fn warmup_batch_size(&self) -> usize { self.base.warmup_batch_size }
+    fn gamma(&self) -> f32 {
+        self.base.gamma
+    }
+    fn epsilon_start(&self) -> f32 {
+        self.base.epsilon_start
+    }
+    fn epsilon_end(&self) -> f32 {
+        self.base.epsilon_end
+    }
+    fn epsilon_decay(&self) -> f32 {
+        self.base.epsilon_decay
+    }
+    fn learning_rate(&self) -> f64 {
+        self.base.learning_rate
+    }
+    fn batch_size(&self) -> usize {
+        self.base.batch_size
+    }
+    fn buffer_capacity(&self) -> usize {
+        self.base.buffer_capacity
+    }
+    fn target_update_freq(&self) -> usize {
+        self.base.target_update_freq
+    }
+    fn max_gradient_norm(&self) -> f32 {
+        self.base.max_gradient_norm
+    }
+    fn loss_sync_freq(&self) -> usize {
+        self.base.loss_sync_freq
+    }
+    fn warmup_steps(&self) -> usize {
+        self.base.warmup_steps
+    }
+    fn warmup_batch_size(&self) -> usize {
+        self.base.warmup_batch_size
+    }
 }
 
 impl MetisTrainerConfig {
@@ -145,7 +169,9 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
             .with_beta_1(0.9)
             .with_beta_2(0.999)
             .with_epsilon(1e-8)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.max_gradient_norm())))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(
+                config.max_gradient_norm(),
+            )))
             .init();
 
         Ok(Self {
@@ -159,7 +185,7 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
             optimizer,
             accumulated_loss: Tensor::<B, 1>::zeros([1], &device),
             accumulated_count: 0,
-            loss_sync_freq: 500,
+            loss_sync_freq: config.loss_sync_freq(),
             warmup_complete: false,
         })
     }
@@ -169,7 +195,9 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
         if self.warmup_complete {
             self.config.batch_size()
         } else {
-            self.config.warmup_batch_size().min(self.config.batch_size())
+            self.config
+                .warmup_batch_size()
+                .min(self.config.batch_size())
         }
     }
 
@@ -249,8 +277,12 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
             .detach();
 
         // 7. Compute TD target
-        let target_q =
-            loss::compute_td_target(&batch.rewards, &max_next_q, &batch.dones, self.config.gamma());
+        let target_q = loss::compute_td_target(
+            &batch.rewards,
+            &max_next_q,
+            &batch.dones,
+            self.config.gamma(),
+        );
 
         // 8. Compute DQN loss
         let dqn_loss = loss::compute_double_dqn_loss(&current_q, &target_q);
@@ -262,9 +294,11 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
         let grads = joint_loss.backward();
         let grads_params = GradientsParams::from_grads(grads, &self.model);
 
-        self.model =
-            self.optimizer
-                .step(self.config.learning_rate(), self.model.clone(), grads_params);
+        self.model = self.optimizer.step(
+            self.config.learning_rate(),
+            self.model.clone(),
+            grads_params,
+        );
 
         // 11. Update step count
         self.step_count += 1;
