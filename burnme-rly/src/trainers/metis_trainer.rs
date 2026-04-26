@@ -146,9 +146,7 @@ pub struct MetisTrainer<B: AutodiffBackend> {
     pub device: B::Device,
     pub optimizer: OptimizerAdaptor<Adam, CombinedModel<B>, B>,
     /// Async loss accumulation - avoids GPU→CPU sync every step
-    accumulated_loss: Tensor<B, 1>,
-    accumulated_count: usize,
-    loss_sync_freq: usize,
+    loss_accumulator: crate::loss::LossAccumulator<B>,
     pub warmup_complete: bool,
 }
 
@@ -183,9 +181,7 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
             epsilon: config.epsilon_start(),
             device: device.clone(),
             optimizer,
-            accumulated_loss: Tensor::<B, 1>::zeros([1], &device),
-            accumulated_count: 0,
-            loss_sync_freq: config.loss_sync_freq(),
+            loss_accumulator: crate::loss::LossAccumulator::new(config.loss_sync_freq(), &device),
             warmup_complete: false,
         })
     }
@@ -316,23 +312,11 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
         // 13. Decay epsilon
         self.epsilon = (self.epsilon * self.config.epsilon_decay()).max(self.config.epsilon_end());
 
-        // 14. Accumulate loss on GPU (no sync!)
-        self.accumulated_loss = self.accumulated_loss.clone() + joint_loss.detach();
-        self.accumulated_count += 1;
+        // 14. Accumulate loss on GPU (async - no sync!)
+        self.loss_accumulator.accumulate(joint_loss.detach());
 
-        // 15. Only sync every loss_sync_freq steps
-        if self.accumulated_count.is_multiple_of(self.loss_sync_freq) {
-            let avg_loss = self.accumulated_loss.clone() / self.accumulated_count as f32;
-            let loss_value = loss::loss_to_scalar(avg_loss);
-
-            // Reset accumulator
-            self.accumulated_loss = Tensor::<B, 1>::zeros([1], &self.device);
-            self.accumulated_count = 0;
-
-            Some(loss_value)
-        } else {
-            None // No sync this step
-        }
+        // 15. Try to sync accumulated loss
+        self.loss_accumulator.try_sync()
     }
 
     /// Save checkpoint
@@ -363,6 +347,11 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
         self.step_count = metadata.step_count;
         self.epsilon = metadata.epsilon;
         Ok(())
+    }
+
+    /// Force sync accumulated loss (for end of training)
+    pub fn flush_loss(&mut self) -> Option<f32> {
+        self.loss_accumulator.force_sync()
     }
 }
 

@@ -48,11 +48,8 @@ pub fn should_train(
 
 /// Execute a training step with automatic warmup handling.
 ///
-/// This helper function coordinates:
-/// - Batch size determination (warmup vs full)
-/// - Buffer availability check
-/// - Training execution (sampling handled internally)
-/// - Loss reporting
+/// This is a convenience wrapper that reads the agent's own configuration
+/// and delegates to `train_step_with_warmup_config`.
 ///
 /// # Arguments
 /// * `agent` - The learning agent implementing GpuTrainable
@@ -76,26 +73,9 @@ pub fn train_step_with_warmup<B: AutodiffBackend, Buf: BufferOps>(
     steps_since_last_train: usize,
     device: &B::Device,
 ) -> Option<f32> {
-    // Determine effective batch size based on warmup state
-    let batch_size = if agent.is_warmup_complete() {
-        agent.batch_size()
-    } else {
-        let warmup_size = agent.warmup_batch_size().min(agent.batch_size());
-        // Check if we should complete warmup
-        let buffer_len: usize = agent.buffer().len();
-        if buffer_len >= agent.batch_size() {
-            agent.set_warmup_complete(true);
-        }
-        warmup_size
-    };
-
-    // Check if buffer has enough samples
-    if !agent.buffer().can_sample(batch_size) {
-        return None;
-    }
-
-    // Training step handles its own sampling internally
-    agent.train_step_gpu_native(steps_since_last_train, device)
+    let warmup_batch_size = agent.warmup_batch_size();
+    let full_batch_size = agent.full_batch_size();
+    train_step_with_warmup_config(agent, full_batch_size, warmup_batch_size, steps_since_last_train, device)
 }
 
 /// Execute a training step with automatic warmup handling and configurable batch sizes.
