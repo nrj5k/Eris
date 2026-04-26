@@ -75,7 +75,13 @@ pub fn train_step_with_warmup<B: AutodiffBackend, Buf: BufferOps>(
 ) -> Option<f32> {
     let warmup_batch_size = agent.warmup_batch_size();
     let full_batch_size = agent.full_batch_size();
-    train_step_with_warmup_config(agent, full_batch_size, warmup_batch_size, steps_since_last_train, device)
+    train_step_with_warmup_config(
+        agent,
+        full_batch_size,
+        warmup_batch_size,
+        steps_since_last_train,
+        device,
+    )
 }
 
 /// Execute a training step with automatic warmup handling and configurable batch sizes.
