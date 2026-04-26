@@ -202,13 +202,15 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
         batch_size: usize,
     ) -> Tensor<B, 1> {
         // Min-max normalization to [0, 1]
-        let rewards_2d = rewards.clone().reshape([batch_size, 1]);
-        let min_reward = rewards.clone().min().reshape([1, 1]);
-        let max_reward = rewards.clone().max().reshape([1, 1]);
+        // Clone once for stats (min/max), clone once for 2d reshape
+        let rewards_stats = rewards.clone();
+        let min_reward = rewards_stats.clone().min().reshape([1, 1]);
+        let max_reward = rewards_stats.max().reshape([1, 1]);
         let range = max_reward.clone() - min_reward.clone();
         let epsilon = Tensor::<B, 2>::full([1, 1], 1e-8, &self.device);
 
-        let normalized_rewards = (rewards_2d.clone() - min_reward) / (range + epsilon);
+        let rewards_2d = rewards.clone().reshape([batch_size, 1]);
+        let normalized_rewards = (rewards_2d - min_reward) / (range + epsilon);
 
         let diff = importance.clone() - normalized_rewards;
         diff.powf_scalar(2.0).mean()
@@ -243,7 +245,7 @@ impl<B: AutodiffBackend> MetisTrainer<B> {
         }
 
         // 2. Forward through model (both bandit and DQN)
-        let (_features, importance, q_values) = self.model.forward(batch.states.clone());
+        let (_features, importance, q_values) = self.model.forward(batch.states);
 
         // 3. Gather current Q(s, a)
         let current_q = loss::gather_q_values(&q_values, &batch.actions);
