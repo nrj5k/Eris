@@ -37,7 +37,7 @@
 //! ```
 
 use burn::tensor::backend::Backend;
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::tensor::{Distribution, Int, Tensor, TensorData};
 use rand::prelude::*;
 use rand::rng;
 
@@ -1521,37 +1521,23 @@ impl<B: Backend> GpuRingBuffer<B> {
             return None;
         }
 
-        // Generate random indices on CPU for proper integer uniform distribution
-        let mut rng = rng();
-        let indices: Vec<i32> = (0..batch_size)
-            .map(|_| rng.random_range(0..self.core.len()) as i32)
-            .collect();
-        let indices_data = TensorData::new(indices, [batch_size]);
-        let indices_tensor =
-            Tensor::<B, 1, Int>::from_data(indices_data.convert::<i32>(), &self.device);
+        // GPU-native random index generation (no CPU->GPU copy)
+        let indices = Tensor::<B, 1, Int>::random(
+            [batch_size],
+            Distribution::Uniform(0.0, self.core.len() as f64),
+            &self.device,
+        );
 
         // Use select() to sample from GPU tensors - O(1)!
-        let states = self
-            .states
-            .as_ref()?
-            .clone()
-            .select(0, indices_tensor.clone());
+        let states = self.states.as_ref()?.clone().select(0, indices.clone());
         let next_states = self
             .next_states
             .as_ref()?
             .clone()
-            .select(0, indices_tensor.clone());
-        let actions = self
-            .actions
-            .as_ref()?
-            .clone()
-            .select(0, indices_tensor.clone());
-        let rewards = self
-            .rewards
-            .as_ref()?
-            .clone()
-            .select(0, indices_tensor.clone());
-        let dones = self.dones.as_ref()?.clone().select(0, indices_tensor);
+            .select(0, indices.clone());
+        let actions = self.actions.as_ref()?.clone().select(0, indices.clone());
+        let rewards = self.rewards.as_ref()?.clone().select(0, indices.clone());
+        let dones = self.dones.as_ref()?.clone().select(0, indices);
 
         Some(GpuTransitionBatch {
             states,
@@ -1576,6 +1562,13 @@ impl<B: Backend> GpuRingBuffer<B> {
     ///
     /// * `Some(GpuTransitionBatch<B>)` - Random batch if enough samples available
     /// * `None` - If `self.len < batch_size`
+    ///
+    /// # Note
+    ///
+    /// This method uses CPU-based random index generation for reproducibility.
+    /// GPU-native `Distribution::random()` does not support custom RNG seeds.
+    /// For reproducible experiments, use this method with a seeded RNG.
+    /// For maximum performance, use `sample()` which uses GPU-native random generation.
     ///
     /// # Reproducibility
     ///
@@ -1608,7 +1601,8 @@ impl<B: Backend> GpuRingBuffer<B> {
             return None;
         }
 
-        // Generate indices with provided RNG
+        // CPU-based index generation for reproducibility
+        // GPU-native Distribution::random() does not support custom RNG seeds
         let indices: Vec<i32> = (0..batch_size)
             .map(|_| rng.random_range(0..self.core.len()) as i32)
             .collect();
