@@ -1160,7 +1160,7 @@ fn run_cacheus_training(args: &Args) -> Result<(), String> {
     println!("Learning rate: {}", args.learning_rate);
 
     // Create CACHEUS policy (no device needed - tabular)
-    let mut policy = CacheusPolicy::new(2, args.learning_rate as f32);
+    let mut policy = CacheusPolicy::new(2, args.learning_rate as f64);
 
     // Create environment
     let trace_path = &args.trace_file;
@@ -1638,7 +1638,7 @@ fn run_bandit_training<B: burn::tensor::backend::AutodiffBackend>(
     let policy_config = BanditPolicyConfig::new(
         bandit_config,
         exploration,
-        args.learning_rate as f32,
+        args.learning_rate as f64,
         num_tiers,
     );
 

@@ -67,10 +67,10 @@ pub trait CachePolicy {
 /// Marker trait for online learning policies (no replay buffer)
 pub trait OnlinePolicy: CachePolicy {
     /// Learning rate for online updates
-    fn learning_rate(&self) -> f32;
+    fn learning_rate(&self) -> f64;
 
     /// Set learning rate
-    fn set_learning_rate(&mut self, lr: f32);
+    fn set_learning_rate(&mut self, lr: f64);
 }
 
 /// Trait for replay-based policies

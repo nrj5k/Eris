@@ -236,7 +236,7 @@ pub struct BanditPolicyConfig {
     /// Exploration strategy configuration
     pub exploration: ExplorationConfig,
     /// Learning rate for online updates
-    pub learning_rate: f32,
+    pub learning_rate: f64,
     /// Number of tiers for action mapping
     pub num_tiers: usize,
 }
@@ -246,7 +246,7 @@ impl BanditPolicyConfig {
     pub fn new(
         bandit_config: BanditConfig,
         exploration: ExplorationConfig,
-        learning_rate: f32,
+        learning_rate: f64,
         num_tiers: usize,
     ) -> Self {
         Self {
@@ -304,7 +304,7 @@ pub struct BanditPolicy<B: AutodiffBackend> {
     /// Device for tensor operations
     device: B::Device,
     /// Learning rate for updates
-    learning_rate: f32,
+    learning_rate: f64,
     /// Optimizer configuration
     optimizer_config: AdamConfig,
 }
@@ -554,11 +554,11 @@ impl<B: AutodiffBackend> CachePolicy for BanditPolicy<B> {
 }
 
 impl<B: AutodiffBackend> OnlinePolicy for BanditPolicy<B> {
-    fn learning_rate(&self) -> f32 {
+    fn learning_rate(&self) -> f64 {
         self.learning_rate
     }
 
-    fn set_learning_rate(&mut self, lr: f32) {
+    fn set_learning_rate(&mut self, lr: f64) {
         self.learning_rate = lr;
     }
 }

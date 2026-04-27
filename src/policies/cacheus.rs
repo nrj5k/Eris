@@ -15,7 +15,7 @@ pub struct CacheusPolicy {
     /// Number of arms (2: LRU, LFU)
     n_arms: usize,
     /// Learning rate
-    learning_rate: f32,
+    learning_rate: f64,
     /// Arm weights (softmax logits)
     weights: Vec<f32>,
     /// Cumulative regret per arm
@@ -30,7 +30,7 @@ pub struct CacheusPolicy {
 
 impl CacheusPolicy {
     /// Create new CACHEUS policy
-    pub fn new(n_arms: usize, learning_rate: f32) -> Self {
+    pub fn new(n_arms: usize, learning_rate: f64) -> Self {
         Self {
             n_arms,
             learning_rate,
@@ -124,7 +124,7 @@ impl CachePolicy for CacheusPolicy {
 
         // Update weights: θ -= α * regret
         for i in 0..self.n_arms {
-            self.weights[i] -= self.learning_rate * self.cumulative_regret[i];
+            self.weights[i] -= (self.learning_rate as f32) * self.cumulative_regret[i];
             // Clip weights
             self.weights[i] = self.weights[i].clamp(self.min_weight, self.max_weight);
         }
@@ -156,11 +156,11 @@ impl CachePolicy for CacheusPolicy {
 }
 
 impl OnlinePolicy for CacheusPolicy {
-    fn learning_rate(&self) -> f32 {
+    fn learning_rate(&self) -> f64 {
         self.learning_rate
     }
 
-    fn set_learning_rate(&mut self, lr: f32) {
+    fn set_learning_rate(&mut self, lr: f64) {
         self.learning_rate = lr;
     }
 }
