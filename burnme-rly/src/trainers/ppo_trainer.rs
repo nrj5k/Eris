@@ -12,6 +12,7 @@ use crate::buffer::CpuRingBuffer;
 use crate::checkpoint::{
     load_checkpoint, save_checkpoint, CheckpointMetadata, CheckpointMetadataExt,
 };
+use crate::loss::LossAccumulator;
 use crate::models::ppo_model::PpoModel;
 use crate::trainers::base::{TrainerConfig, TrainerConfigBase};
 
@@ -182,6 +183,8 @@ pub struct PpoTrainer<B: AutodiffBackend> {
     pub state_dim: usize,
     /// Episode counter
     pub episode_count: usize,
+    /// Async loss accumulation - avoids GPU→CPU sync every step
+    pub loss_accumulator: LossAccumulator<B>,
 }
 
 impl<B: AutodiffBackend> PpoTrainer<B> {
@@ -201,6 +204,8 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
 
         let optimizer = config.base.build_adam::<PpoModel<B>, B>();
 
+        let loss_accumulator = LossAccumulator::new(config.loss_sync_freq(), &device);
+
         Ok(Self {
             model,
             old_model,
@@ -212,6 +217,7 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
             warmup_complete: false,
             state_dim,
             episode_count: 0,
+            loss_accumulator,
         })
     }
 
@@ -265,9 +271,6 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
         if self.buffer.len() < self.config.base.batch_size {
             return None;
         }
-
-        let mut total_loss = 0.0f32;
-        let mut update_count = 0usize;
 
         // PPO epochs: multiple passes over the same rollout data
         for _epoch in 0..self.config.ppo_epochs {
@@ -326,10 +329,8 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
                 grads_params,
             );
 
-            // Accumulate loss for logging
-            let loss_value: f32 = loss.into_data().convert::<f32>().as_slice::<f32>().unwrap()[0];
-            total_loss += loss_value;
-            update_count += 1;
+            // Accumulate loss on GPU (async - like DQN/Metis)
+            self.loss_accumulator.accumulate(loss.detach());
         }
 
         // Update old_model after all epochs
@@ -340,7 +341,13 @@ impl<B: AutodiffBackend> PpoTrainer<B> {
 
         self.step_count += 1;
 
-        Some(total_loss / update_count as f32)
+        // Sync accumulated loss to CPU
+        self.loss_accumulator.force_sync()
+    }
+
+    /// Flush accumulated loss to CPU (for end of training)
+    pub fn flush_loss(&mut self) -> Option<f32> {
+        self.loss_accumulator.force_sync()
     }
 
     /// Check if warmup is complete
