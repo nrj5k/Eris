@@ -175,7 +175,7 @@ fn run_test(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             .zip(obs.iter())
             .for_each(|(dst, &src)| *dst = src as f32);
 
-        // Create tensor from pre-allocated buffer (clone avoids growth/reallocation)
+        // Create tensor from pre-allocated buffer (clone is necessary for reuse pattern)
         let obs_tensor = Tensor::<NdArray, 2>::from_data(
             TensorData::new(obs_buf.clone(), [1, state_dim]),
             &device,
@@ -185,12 +185,11 @@ fn run_test(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         let q_values = forward_result.2;
 
         // Use tensor argmax (matches pattern in combined.rs:161 and train_model.rs:678)
+        // Optimized: use as_slice() instead of to_vec() to avoid allocation
         let action_tensor = q_values.argmax(1); // Returns [1, 1] tensor with index of max
-        let action: usize = action_tensor
-            .into_data()
-            .convert::<i32>()
-            .to_vec::<i32>()
-            .expect("argmax conversion")[0] as usize;
+        let action_data = action_tensor.into_data().convert::<i32>();
+        let action_slice: &[i32] = action_data.as_slice().expect("argmax conversion");
+        let action = action_slice[0] as usize;
 
         let (next_obs, reward, done) = env.step(action);
         println!(
