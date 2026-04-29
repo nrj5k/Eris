@@ -1342,20 +1342,20 @@ fn main() {
             // 5. Add progress reporting
 
             tracing::info!("Training skeleton ready - dispatch not yet implemented");
-            
+
             // Placeholder to satisfy compiler
             let _backend = &args.backend;
             let _config_path = &args.config;
             let _trace_path = &args.trace_file;
             let _trace_format = to_trace_format(&args.trace_format);
-            
+
             // TODO: Add actual training dispatch here
             // Example pattern from train_inference:
             // let model = Box::new(
             //     eris::models::CombinedModelConfig::new(...)
             //         .init(&device)
             // );
-            
+
             println!("Training complete (skeleton)");
         })
         .unwrap()

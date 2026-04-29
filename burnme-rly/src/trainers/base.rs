@@ -218,13 +218,13 @@ pub trait TrainerConfig: Clone {
         // Epsilon validation: allow 0 for policy gradient methods (PPO doesn't use epsilon-greedy)
         let eps_start = self.epsilon_start();
         let eps_end = self.epsilon_end();
-        if eps_start < 0.0 || eps_start > 1.0 {
+        if !(0.0..=1.0).contains(&eps_start) {
             return Err(format!(
                 "epsilon_start must be in [0, 1], got {}",
                 eps_start
             ));
         }
-        if eps_end < 0.0 || eps_end > eps_start {
+        if !(0.0..=eps_start).contains(&eps_end) {
             return Err(format!(
                 "epsilon_end must be in [0, epsilon_start], got {}",
                 eps_end

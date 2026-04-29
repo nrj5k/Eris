@@ -42,7 +42,7 @@ use crate::training::HybridRingBuffer;
 use crate::training::TensorTransitionBatch;
 
 /// Training configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TrainingConfig {
     /// Learning rate for optimizer
     pub learning_rate: f64,
@@ -108,6 +108,8 @@ pub struct CombinedAgent<B: AutodiffBackend> {
     pub buffer: HybridRingBuffer<B>,
     /// Training configuration
     pub config: TrainingConfig,
+    /// Model configuration (needed for reload)
+    pub model_config: CombinedBanditDQNConfig,
     /// Current epsilon for exploration
     pub epsilon: f32,
     /// Training step counter
@@ -168,6 +170,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             target_model,
             buffer,
             config: config.clone(),
+            model_config,
             epsilon: config.epsilon_start,
             step_count: 0,
             device: device.clone(),
@@ -878,6 +881,7 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
             target_model,
             buffer,
             config,
+            model_config,
             epsilon: metadata.epsilon,
             step_count: metadata.step_count,
             device: device.clone(),
@@ -900,6 +904,52 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
         if let Err(e) = self.save_checkpoint(&path, 0, 0.0) {
             tracing::error!("Failed to save model: {}", e);
         }
+    }
+
+    /// Reload checkpoint into existing agent
+    ///
+    /// # Arguments
+    /// * `path` - Path to checkpoint file
+    ///
+    /// # Errors
+    /// Returns an error if the checkpoint cannot be loaded
+    pub fn reload_checkpoint<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::training::checkpoint::load_checkpoint;
+
+        // Extract directory and name from path
+        let directory = path.as_ref().parent().unwrap_or(Path::new("."));
+        let name = path
+            .as_ref()
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("model");
+
+        // Load policy network using Burn's recorder
+        let (model, metadata) = load_checkpoint::<B, _>(
+            directory,
+            name,
+            0, // Use epoch 0 for single checkpoint
+            &self.device,
+            || self.model_config.init(&self.device),
+        )?;
+
+        // Load target network (use underscore instead of dot for filename)
+        let target_name = format!("{}_target", name);
+        let (target_model, _metadata) =
+            load_checkpoint::<B, _>(directory, &target_name, 0, &self.device, || {
+                self.model_config.init(&self.device)
+            })?;
+
+        // Update agent state
+        self.model = model;
+        self.target_model = target_model;
+        self.epsilon = metadata.epsilon;
+        self.step_count = metadata.step_count;
+
+        Ok(())
     }
 }
 

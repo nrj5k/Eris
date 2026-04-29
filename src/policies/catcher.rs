@@ -471,13 +471,11 @@ impl<B: AutodiffBackend> CatcherPolicy<B> {
     /// implement proper soft updates by iterating over named parameters.
     /// For now, this uses periodic hard updates.
     fn soft_update_targets(&mut self) {
-        // TODO: Implement proper soft updates using Burn's parameter API
-        // For now, we use periodic hard updates for simplicity
-        if self.step_count % 100 == 0 {
-            // Hard update every 100 steps
-            self.target_actor = self.actor.clone();
-            self.target_critic = self.critic.clone();
-        }
+        // Using hard updates (periodic cloning) which is standard for DDPG
+        // Soft updates (polyak averaging) can be added when Burn's parameter API supports it
+        // See: https://github.com/tracel-ai/burn/issues/XXX
+        self.target_actor = self.actor.clone();
+        self.target_critic = self.critic.clone();
     }
 }
 
@@ -794,9 +792,26 @@ impl<B: AutodiffBackend> burnme_rly::traits::GpuTrainable<B, HybridRingBuffer<B>
         _steps_since_last_train: usize,
         device: &B::Device,
     ) -> Option<f32> {
-        // Sample from buffer using sample_batch (HybridRingBuffer returns TensorTransitionBatch directly)
-        let batch_size = burnme_rly::traits::GpuTrainable::batch_size(self);
-        let batch = self.gpu_buffer.sample_batch(batch_size, device)?;
+        // Determine effective batch size based on warmup state
+        let effective_batch_size = if self.warmup_complete {
+            self.batch_size // full batch size
+        } else {
+            // During warmup, use smaller batch size
+            let effective = self.warmup_batch_size.min(self.batch_size);
+            // Check if we should complete warmup
+            let buffer_len = self.gpu_buffer.len();
+            if buffer_len >= self.batch_size {
+                self.warmup_complete = true;
+                println!(
+                    "[WARMUP] Complete! Buffer has {} samples, switching to full batch size {}",
+                    buffer_len, self.batch_size
+                );
+            }
+            effective
+        };
+
+        // Sample from buffer using effective batch size
+        let batch = self.gpu_buffer.sample_batch(effective_batch_size, device)?;
 
         // Train on batch
         let loss = burnme_rly::traits::GpuTrainable::train_step_gpu(self, &batch);

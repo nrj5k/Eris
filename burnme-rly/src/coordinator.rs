@@ -276,20 +276,11 @@ impl GpuTrainingCoordinator {
             );
 
             if should_train {
-                // ASYNC LOSS ACCUMULATION (Metis optimization)
-                //
-                // Traditional: Loss synced from GPU to CPU every step (GPU→CPU barrier)
-                // Optimized: Loss accumulated on GPU for N steps, synced only every Nth step
-                //
-                // Benefits:
-                // - Reduces GPU→CPU synchronization overhead by ~90% (with loss_sync_freq=100)
-                // - Higher GPU utilization (less idle time waiting for CPU sync)
-                // - Better throughput (more training steps per second)
-                //
-                // Tradeoff:
-                // - Loss value is delayed by up to loss_sync_freq steps
-                // - Average is still accurate (just over synced steps only)
-                if let Some(loss) = agent.train_step_gpu_native(total_steps, device) {
+                // Use warmup-aware training function to properly handle warmup completion
+                // This ensures is_warmup_complete is set to true when buffer has enough samples
+                if let Some(loss) =
+                    crate::warmup::train_step_with_warmup(agent, steps_since_last_train, device)
+                {
                     // Only accumulate loss when it's synced from GPU
                     total_loss += loss;
                     train_steps += 1;

@@ -26,17 +26,9 @@ pub trait QNetwork<B: AutodiffBackend>: AutodiffModule<B> {
 }
 
 /// Training hyperparameters for DQNTrainer
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DQNTrainerConfig {
     pub base: TrainerConfigBase,
-}
-
-impl Default for DQNTrainerConfig {
-    fn default() -> Self {
-        Self {
-            base: TrainerConfigBase::default(),
-        }
-    }
 }
 
 impl TrainerConfig for DQNTrainerConfig {
