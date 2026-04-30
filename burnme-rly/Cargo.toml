@@ -15,6 +15,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
 
+# Optional dependencies for optimus feature
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+itransformer = { version = "2.0", optional = true }
+either = { version = "1.13", optional = true }
+toml = { version = "0.8", optional = true }
+
 [features]
 default = ["wgpu", "cpu"]
 cuda = ["burn/cuda", "burn/autodiff", "burn/train"]
@@ -22,6 +29,7 @@ rocm = ["burn/rocm", "burn/autodiff", "burn/train"]
 wgpu = ["burn/wgpu", "burn/autodiff", "burn/train"]
 cpu = ["burn/ndarray", "burn/train"]
 spirv = ["wgpu", "burn/ir"]
+optimus = ["candle-core", "candle-nn", "itransformer", "either", "toml"]
 
 [dev-dependencies]
 burn = { version = "0.20", features = ["ndarray", "autodiff"] }

@@ -45,6 +45,9 @@ parallel = ["rayon"]
 # SPIR-V support for wgpu (Vulkan targets with better performance)
 spirv = ["wgpu", "burn/ir"]
 
+# Optimus iTransformer feature
+optimus = ["burnme-rly/optimus"]
+
 [dependencies]
 burnme-rly = { path = "burnme-rly" }
 postcard = { version = "1.1", features = ["alloc", "use-crc"] }
@@ -85,3 +88,13 @@ tempfile = "3.20"
 [[bench]]
 name = "batch_size_bench"
 harness = false
+
+[[bin]]
+name = "optimus_inference"
+path = "src/bin/optimus_inference.rs"
+required-features = ["optimus"]
+
+[[bin]]
+name = "train_optimus"
+path = "src/bin/train_optimus.rs"
+required-features = ["optimus"]
