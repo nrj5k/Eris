@@ -58,7 +58,7 @@ impl OptimusModel {
             candle_device,
         )?;
 
-        println!("[Optimus] Model created on device: {:?}", candle_device);
+        log::info!("[Optimus] Model created on device: {:?}", candle_device);
 
         Ok(Self {
             inner,

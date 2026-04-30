@@ -88,12 +88,12 @@ pub fn select_device<B: Backend>(
             }
             #[cfg(not(feature = "cuda"))]
             {
-                eprintln!("[WARN] CUDA feature not enabled, falling back to CPU");
+                log::warn!("CUDA feature not enabled, falling back to CPU");
                 Ok(CandleDevice::Cpu)
             }
         }
         Some(s) => {
-            eprintln!("[WARN] Unknown device '{}', using auto", s);
+            log::warn!("Unknown device '{}', using auto", s);
             burn_device_to_candle::<B>(_burn_device)
         }
     }
@@ -211,7 +211,7 @@ impl BridgeDevice {
                 }
                 #[cfg(not(feature = "cuda"))]
                 {
-                    eprintln!("[WARN] CUDA not enabled, falling back to CPU");
+                    log::warn!("CUDA not enabled, falling back to CPU");
                     Ok(CandleDevice::Cpu)
                 }
             }

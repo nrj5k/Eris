@@ -80,7 +80,7 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
         let model =
             OptimusModel::new(&config, &candle_device).expect("Failed to create Optimus model");
 
-        println!(
+        log::info!(
             "[OptimusPolicy] Created on {}",
             device_name::<B>(&burn_device)
         );

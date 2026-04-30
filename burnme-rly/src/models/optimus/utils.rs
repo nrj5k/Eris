@@ -34,7 +34,7 @@ pub fn resolve_device(device_str: &str) -> crate::models::optimus::bridge::Bridg
     match device_str.to_lowercase().as_str() {
         "auto" => BridgeDevice::auto(),
         s => crate::models::optimus::bridge::parse_device_str(s).unwrap_or_else(|| {
-            eprintln!("[WARN] Unknown device '{}', using auto", s);
+            log::warn!("Unknown device '{}', using auto", s);
             BridgeDevice::auto()
         }),
     }
