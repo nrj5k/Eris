@@ -38,6 +38,9 @@ enum ModelType {
     Dqn,
     /// Bandit: Standalone Contextual Bandit
     Bandit,
+    /// Optimus: iTransformer for time series forecasting
+    #[cfg(feature = "optimus")]
+    Optimus,
 }
 
 /// Exploration strategy for action selection
@@ -395,6 +398,12 @@ fn train_model_generic(args: &Args, device: Device) -> Result<(), String> {
         return dispatch_training!(device, |B, dev| {
             run_bandit_training::<B>(args, dev, exploration.clone())
         });
+    }
+
+    // Check if using Optimus (requires backend and optimus feature)
+    #[cfg(feature = "optimus")]
+    if matches!(args.model, ModelType::Optimus) {
+        return dispatch_training!(device, |B, dev| { run_optimus_training::<B>(args, dev) });
     }
 
     // Use VecEnv for parallel environments if num_envs > 1
@@ -1742,6 +1751,142 @@ fn run_bandit_training<B: burn::tensor::backend::AutodiffBackend>(
 }
 
 // ============================================================================
+// OPTIMUS TRAINING (ITRANSFORMER WITH COORDINATOR)
+// ============================================================================
+
+/// Train Optimus policy (iTransformer for time series forecasting) using VecEnv and GpuTrainingCoordinator.
+#[cfg(feature = "optimus")]
+fn run_optimus_training<B: burn::tensor::backend::AutodiffBackend>(
+    args: &Args,
+    device: B::Device,
+) -> Result<(), String> {
+    use burnme_rly::coordinator::GpuTrainingCoordinator;
+    use burnme_rly::models::optimus::{OptimusConfig, OptimusPolicy};
+    use eris::env::VecEnv;
+
+    println!("=== Training Optimus iTransformer ===");
+    println!("Episodes: {}", args.episodes);
+    println!("Max steps: {}", args.max_steps);
+    println!("Batch size: {}", args.batch_size);
+    println!("Parallel environments: {}", args.num_envs);
+
+    // Validate num_envs
+    if args.num_envs == 0 {
+        return Err("num_envs must be greater than 0".to_string());
+    }
+
+    // Validate buffer capacity
+    if args.buffer_capacity < args.batch_size * 4 {
+        return Err(format!(
+            "buffer_capacity ({}) must be >= batch_size * 4 ({})",
+            args.buffer_capacity,
+            args.batch_size * 4
+        ));
+    }
+
+    // Create vectorized environment
+    let trace_path = &args.trace_file;
+    let config_path = &args.config;
+
+    println!("Creating {} parallel environments...", args.num_envs);
+    let mut vec_env = VecEnv::new(
+        args.num_envs,
+        config_path,
+        trace_path,
+        to_trace_format(&args.trace_format),
+        args.max_steps,
+    )
+    .map_err(|e| format!("Failed to create VecEnv: {}", e))?;
+
+    // Get dimensions from environment
+    let state_dim = vec_env.observation_dim();
+    let action_dim = vec_env.action_space().n;
+
+    println!("State dim: {}", state_dim);
+    println!("Action dim: {}", action_dim);
+
+    // Create Optimus config
+    let optimus_config = OptimusConfig::new()
+        .with_num_variates(state_dim)
+        .with_lookback_len(96) // Could be CLI arg in future
+        .with_pred_len(48); // Could be CLI arg in future
+
+    // Validate config
+    optimus_config
+        .validate()
+        .map_err(|e| format!("Optimus config validation failed: {}", e))?;
+
+    // Create Optimus policy
+    let mut policy = OptimusPolicy::<B>::new(
+        optimus_config,
+        device.clone(),
+        action_dim,
+        args.backend.as_str().into(), // Device override from CLI
+    );
+
+    println!("Optimus policy initialized!");
+    println!(
+        "GPU-native training: batch_size={}, device={:?}",
+        args.batch_size, device
+    );
+
+    // Create training coordinator with configuration
+    let training_config = burnme_rly::coordinator::TrainingConfig::new(
+        args.episodes,
+        args.max_steps,
+        args.batch_size,
+    )
+    .with_warmup_batch_size(args.warmup_batch_size)
+    .with_train_frequency(4)
+    .with_checkpoint_interval(10);
+
+    let coordinator = GpuTrainingCoordinator::new(training_config);
+
+    println!("\nStarting Optimus training with GpuTrainingCoordinator...");
+    println!(
+        "Warmup: {} samples → {} samples",
+        coordinator.config.warmup_batch_size, coordinator.config.batch_size
+    );
+    println!(
+        "Train frequency: every {} steps after warmup",
+        coordinator.config.train_frequency
+    );
+
+    // Run training using coordinator
+    let start_time = std::time::Instant::now();
+    let metrics = coordinator
+        .run_training::<OptimusPolicy<B>, VecEnv, B, _>(
+            &mut policy,
+            &mut vec_env,
+            &device,
+            "checkpoints/optimus",
+        )
+        .map_err(|e| format!("Training failed: {}", e))?;
+    let elapsed = start_time.elapsed();
+
+    // Print final metrics
+    println!("\n{}", "=".repeat(60));
+    tracing::info!("[STAGE:DONE] Optimus Training Complete!");
+    println!("{}", "=".repeat(60));
+    println!("Total episodes: {}", metrics.total_episodes);
+    println!(
+        "Total steps: {} ({:.0} per env)",
+        metrics.total_steps,
+        metrics.total_steps as f64 / args.num_envs as f64
+    );
+    println!("Average reward: {:.2}", metrics.avg_reward);
+    println!("Final loss: {:.4}", metrics.final_loss);
+    println!("Elapsed time: {:.2}s", elapsed.as_secs_f64());
+    println!(
+        "Throughput: {:.0} steps/sec",
+        metrics.total_steps as f64 / elapsed.as_secs_f64()
+    );
+    println!("\nCheckpoints saved to: checkpoints/optimus_episode_*.mpk");
+
+    Ok(())
+}
+
+// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -1810,6 +1955,13 @@ mod tests {
                 .unwrap()
                 .model,
             ModelType::Bandit
+        ));
+        #[cfg(feature = "optimus")]
+        assert!(matches!(
+            Args::try_parse_from(&["train_model", "--model", "optimus"])
+                .unwrap()
+                .model,
+            ModelType::Optimus
         ));
     }
 
