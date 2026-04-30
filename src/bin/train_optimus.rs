@@ -35,7 +35,11 @@ mod optimus_impl {
         /// Checkpoint directory
         #[arg(long, default_value = "checkpoints/optimus")]
         checkpoint_dir: String,
-        // Note: No --device flag needed! Device is auto-detected from Burn backend.
+
+        /// Device override (optional). If not specified, auto-detects from backend.
+        /// Supports: "cpu", "cuda", "cuda:0", "cuda:1", etc.
+        #[arg(long)]
+        device: Option<String>,
     }
 
     pub fn main() {
@@ -65,9 +69,14 @@ mod optimus_impl {
         // Log device info
         println!("Using device: {}", device_name::<TestBackend>(&device));
 
-        // Create policy - no bridge_device needed, auto-detected from Burn device
+        // Create policy - device auto-detected or overridden via --device flag
         let action_dim = 10; // Number of cache actions
-        let policy = OptimusPolicy::<TestBackend>::new(config, device.clone(), action_dim);
+        let policy = OptimusPolicy::<TestBackend>::new(
+            config,
+            device.clone(),
+            action_dim,
+            args.device.as_deref(),
+        );
 
         println!("\nOptimus policy created!");
         println!("Note: Full training loop requires implementing backward pass");

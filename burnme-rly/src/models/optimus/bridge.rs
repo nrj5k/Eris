@@ -41,6 +41,64 @@ pub fn burn_device_to_candle<B: Backend>(
     Ok(CandleDevice::Cpu)
 }
 
+/// Select Candle device with optional override.
+///
+/// If override is Some, use that device.
+/// If override is None, auto-detect from Burn backend.
+///
+/// # Arguments
+/// * `burn_device` - The Burn device (for auto-detection reference)
+/// * `override_str` - Optional device string ("cpu", "cuda", "cuda:0", etc.)
+///
+/// # Returns
+/// * `Ok(CandleDevice)` - The selected Candle device
+/// * `Err(candle_core::Error)` - If CUDA device creation fails
+///
+/// # Examples
+/// ```ignore
+/// // Auto-detect
+/// let device = select_device::<B>(&burn_device, None);
+///
+/// // Force CPU
+/// let device = select_device::<B>(&burn_device, Some("cpu"));
+///
+/// // Use specific GPU
+/// let device = select_device::<B>(&burn_device, Some("cuda:1"));
+/// ```
+pub fn select_device<B: Backend>(
+    _burn_device: &B::Device,
+    override_str: Option<&str>,
+) -> candle_core::Result<CandleDevice> {
+    match override_str {
+        None => {
+            // Auto-detect from Burn backend
+            burn_device_to_candle::<B>(_burn_device)
+        }
+        Some("cpu") => Ok(CandleDevice::Cpu),
+        Some(s) if s.starts_with("cuda") => {
+            #[cfg(feature = "cuda")]
+            {
+                // Parse cuda or cuda:N
+                let idx = s
+                    .split(':')
+                    .nth(1)
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(0);
+                CandleDevice::new_cuda(idx)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                eprintln!("[WARN] CUDA feature not enabled, falling back to CPU");
+                Ok(CandleDevice::Cpu)
+            }
+        }
+        Some(s) => {
+            eprintln!("[WARN] Unknown device '{}', using auto", s);
+            burn_device_to_candle::<B>(_burn_device)
+        }
+    }
+}
+
 /// Check if Burn device is GPU (for logging)
 ///
 /// # Arguments

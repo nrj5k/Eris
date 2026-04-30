@@ -45,7 +45,11 @@ mod optimus_impl {
         /// Output predictions to file
         #[arg(long)]
         output: Option<String>,
-        // Note: No --device flag needed! Device is auto-detected from Burn backend.
+
+        /// Device override (optional). If not specified, auto-detects from backend.
+        /// Supports: "cpu", "cuda", "cuda:0", "cuda:1", etc.
+        #[arg(long)]
+        device: Option<String>,
     }
 
     pub fn main() {
@@ -70,9 +74,10 @@ mod optimus_impl {
         // Log device info
         println!("\nDevice: {}", device_name::<B>(&device));
 
-        // Create policy - no bridge_device needed, auto-detected from Burn device
+        // Create policy - device auto-detected or overridden via --device flag
         let action_dim = 10;
-        let mut policy = OptimusPolicy::<B>::new(config.clone(), device, action_dim);
+        let mut policy =
+            OptimusPolicy::<B>::new(config.clone(), device, action_dim, args.device.as_deref());
 
         // Load checkpoint if exists
         let checkpoint_path = Path::new(&args.checkpoint);

@@ -11,8 +11,11 @@ use crate::buffer::{CpuRingBuffer, TensorTransitionBatch};
 use crate::checkpoint::Checkpointable;
 use crate::traits::{BatchedActionSelector, GpuTrainable};
 
-use super::bridge::{burn_device_to_candle, burn_to_candle, candle_to_burn, device_name};
+use super::bridge::{
+    burn_device_to_candle, burn_to_candle, candle_to_burn, device_name, select_device,
+};
 use super::{OptimusConfig, OptimusModel};
+use candle_core::Device as CandleDevice;
 
 /// Optimus policy for cache prefetching using iTransformer
 ///
@@ -43,26 +46,36 @@ pub struct OptimusPolicy<B: AutodiffBackend> {
 }
 
 impl<B: AutodiffBackend> OptimusPolicy<B> {
-    /// Create new policy from config with automatic device detection
+    /// Create new policy from config with optional device override.
     ///
     /// # Arguments
     /// * `config` - Optimus model configuration
     /// * `burn_device` - Burn backend device for output tensors
     /// * `action_dim` - Number of possible actions (cache line buckets to prefetch)
+    /// * `device_override` - Optional device string override ("cpu", "cuda", "cuda:0", etc.)
     ///
     /// # Returns
     /// A new OptimusPolicy instance with initialized model
     ///
     /// # Device Selection
-    /// The Candle device is automatically derived from the Burn backend device.
-    /// If CUDA feature is enabled and available, GPU will be used. Otherwise falls back to CPU.
+    /// If `device_override` is None, the Candle device is automatically derived from the Burn backend.
+    /// If `device_override` is Some, uses the specified device:
+    /// - "cpu" forces CPU
+    /// - "cuda" or "cuda:0" uses first GPU
+    /// - "cuda:N" uses specific GPU index N
+    /// - Unknown values warn and fall back to auto-detection
     ///
     /// # Panics
     /// Panics if the iTransformer model fails to initialize
-    pub fn new(config: OptimusConfig, burn_device: B::Device, action_dim: usize) -> Self {
-        // Auto-detect Candle device from Burn device
+    pub fn new(
+        config: OptimusConfig,
+        burn_device: B::Device,
+        action_dim: usize,
+        device_override: Option<&str>,
+    ) -> Self {
+        // Select Candle device with optional override
         let candle_device =
-            burn_device_to_candle::<B>(&burn_device).unwrap_or(candle_core::Device::Cpu);
+            select_device::<B>(&burn_device, device_override).unwrap_or(CandleDevice::Cpu);
 
         let model =
             OptimusModel::new(&config, &candle_device).expect("Failed to create Optimus model");
@@ -125,7 +138,7 @@ impl<B: AutodiffBackend> Clone for OptimusPolicy<B> {
         // For training with weight preservation, use checkpoint save/load
         // Auto-detect Candle device from Burn device (same as new())
         let candle_device =
-            burn_device_to_candle::<B>(&self.burn_device).unwrap_or(candle_core::Device::Cpu);
+            select_device::<B>(&self.burn_device, None).unwrap_or(CandleDevice::Cpu);
 
         Self {
             model: OptimusModel::new(&self.config, &candle_device).expect("Failed to clone model"),
@@ -367,7 +380,7 @@ mod tests {
     fn test_optimus_policy_checkpoint_metadata() {
         let config = OptimusConfig::default();
         let device = Default::default();
-        let mut policy = OptimusPolicy::<TestBackend>::new(config.clone(), device, 10);
+        let mut policy = OptimusPolicy::<TestBackend>::new(config.clone(), device, 10, None);
 
         policy.increment_step_count();
         policy.increment_step_count();
@@ -384,7 +397,7 @@ mod tests {
     fn test_optimus_policy_trait_methods() {
         let config = OptimusConfig::default();
         let device = Default::default();
-        let mut policy = OptimusPolicy::<TestBackend>::new(config.clone(), device, 10);
+        let mut policy = OptimusPolicy::<TestBackend>::new(config.clone(), device, 10, None);
 
         // Test GpuTrainable methods
         assert_eq!(policy.batch_size(), 32);
@@ -404,7 +417,7 @@ mod tests {
     fn test_batched_action_selector() {
         let config = OptimusConfig::default();
         let device = Default::default();
-        let policy = OptimusPolicy::<TestBackend>::new(config, device, 10);
+        let policy = OptimusPolicy::<TestBackend>::new(config, device, 10, None);
 
         let observations = vec![
             vec![1.0, 2.0, 3.0],
