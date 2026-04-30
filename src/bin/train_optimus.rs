@@ -10,7 +10,7 @@ mod optimus_impl {
     use burn::backend::Autodiff;
     use burn::tensor::backend::Backend;
     
-    use burnme_rly::models::optimus::{OptimusConfig, OptimusPolicy};
+    use burnme_rly::models::optimus::{OptimusConfig, OptimusPolicy, BridgeDevice, parse_device_str};
     use burnme_rly::traits::GpuTrainable;
     
     #[derive(Parser, Debug)]
@@ -37,9 +37,9 @@ mod optimus_impl {
         #[arg(long, default_value = "checkpoints/optimus")]
         checkpoint_dir: String,
         
-        /// Use GPU if available
-        #[arg(long)]
-        gpu: bool,
+        /// Device for computation (cpu, cuda, cuda:0, cuda:1)
+        #[arg(long, default_value = "auto")]
+        device: String,
     }
     
     pub fn main() {
@@ -67,6 +67,18 @@ mod optimus_impl {
         println!("  n_heads: {}", config.n_heads);
         println!("  n_layers: {}", config.n_layers);
         
+        // Parse device string
+        let bridge_device = match args.device.as_str() {
+            "auto" => BridgeDevice::auto(),
+            _ => parse_device_str(&args.device)
+                .unwrap_or_else(|| {
+                    eprintln!("[WARN] Unknown device '{}', using auto", args.device);
+                    BridgeDevice::auto()
+                }),
+        };
+        
+        println!("Using device: {:?}", bridge_device);
+        
         // Create device with autodiff backend
         type TestBackend = Autodiff<NdArray>;
         let device = <TestBackend as Backend>::Device::default();
@@ -76,6 +88,7 @@ mod optimus_impl {
         let policy = OptimusPolicy::<TestBackend>::new(
             config,
             device.clone(),
+            bridge_device,
             action_dim,
         );
         

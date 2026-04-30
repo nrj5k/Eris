@@ -11,7 +11,7 @@
 
 #[cfg(feature = "optimus")]
 pub use self::{
-    bridge::{burn_to_candle, candle_to_burn},
+    bridge::{burn_to_candle, candle_to_burn, parse_device_str, BridgeDevice},
     config::OptimusConfig,
     model::OptimusModel,
     policy::OptimusPolicy,

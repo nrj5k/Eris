@@ -1,22 +1,34 @@
-//! Optimus iTransformer model using Candle/itransformer
+//! Optimus iTransformer model using Candle with GPU support
 
+use super::bridge::BridgeDevice;
 use super::config::OptimusConfig;
-use candle_core::{Device, Tensor};
+use candle_core::{Device as CandleDevice, Tensor};
 use candle_nn::VarBuilder;
 use itransformer::ITransformer;
 
-/// Optimus model wrapper around iTransformer
+/// Optimus model wrapper around iTransformer with GPU support
 pub struct OptimusModel {
     inner: ITransformer,
     config: OptimusConfig,
+    device: CandleDevice,
 }
 
 impl OptimusModel {
-    /// Create new Optimus model from config
-    pub fn new(config: &OptimusConfig, device: &Device) -> candle_core::Result<Self> {
+    /// Create new Optimus model from config with device selection
+    ///
+    /// # Arguments
+    /// * `config` - Model configuration
+    /// * `bridge_device` - BridgeDevice specifying CPU or GPU
+    ///
+    /// # Returns
+    /// Result containing OptimusModel or error
+    pub fn new(config: &OptimusConfig, bridge_device: &BridgeDevice) -> candle_core::Result<Self> {
+        // Convert to Candle device (CPU or CUDA)
+        let candle_device = bridge_device.to_candle()?;
+
         // Create varmap for parameters
         let varmap = candle_nn::VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, device);
+        let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &candle_device);
 
         // Create iTransformer
         let inner = ITransformer::new(
@@ -36,30 +48,36 @@ impl OptimusModel {
             Some(config.use_revin),
             None,  // revin_affine
             false, // flash_attn
-            device,
+            &candle_device,
         )?;
+
+        println!("[Optimus] Model created on device: {:?}", candle_device);
 
         Ok(Self {
             inner,
             config: config.clone(),
+            device: candle_device,
         })
     }
 
-    /// Forward pass - returns prediction for the configured horizon
+    /// Forward pass on device
+    ///
+    /// # Arguments
+    /// * `x` - Input tensor (already on correct device)
+    ///
+    /// # Returns
+    /// Output tensor on same device
     pub fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         let result = self.inner.forward(x, None, false)?;
 
         // iTransformer returns Either<Vec<(usize, Tensor)>, f64>
         // Extract the first prediction tensor from the Vec variant
         match result {
-            either::Either::Left(predictions) => {
-                // Return the first prediction horizon's tensor
-                predictions
-                    .into_iter()
-                    .next()
-                    .map(|(_, tensor)| tensor)
-                    .ok_or_else(|| candle_core::Error::Msg("No predictions returned".to_string()))
-            }
+            either::Either::Left(predictions) => predictions
+                .into_iter()
+                .next()
+                .map(|(_, tensor)| tensor)
+                .ok_or_else(|| candle_core::Error::Msg("No predictions returned".to_string())),
             either::Either::Right(_) => Err(candle_core::Error::Msg(
                 "Unexpected scalar result from iTransformer".to_string(),
             )),
@@ -69,5 +87,70 @@ impl OptimusModel {
     /// Get config
     pub fn config(&self) -> &OptimusConfig {
         &self.config
+    }
+
+    /// Get the Candle device
+    pub fn device(&self) -> &CandleDevice {
+        &self.device
+    }
+
+    /// Check if running on GPU
+    pub fn is_gpu(&self) -> bool {
+        matches!(self.device, CandleDevice::Cuda(_))
+    }
+
+    /// Get device name for logging
+    pub fn device_name(&self) -> String {
+        match &self.device {
+            CandleDevice::Cpu => "CPU".to_string(),
+            CandleDevice::Cuda(_idx) => "CUDA".to_string(),
+            CandleDevice::Metal(_) => "Metal".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> OptimusConfig {
+        OptimusConfig::new()
+            .with_num_variates(8)
+            .with_lookback_len(16)
+            .with_pred_len(8)
+    }
+
+    #[test]
+    fn test_model_creation_cpu() {
+        let config = test_config();
+        let device = BridgeDevice::Cpu;
+        let model = OptimusModel::new(&config, &device);
+        assert!(model.is_ok());
+        let model = model.unwrap();
+        assert!(!model.is_gpu());
+        assert_eq!(model.device_name(), "CPU");
+    }
+
+    #[test]
+    fn test_forward_shape() {
+        let config = test_config();
+        let device = BridgeDevice::Cpu;
+        let model = OptimusModel::new(&config, &device).unwrap();
+
+        // Create test input: [batch=1, lookback_len, num_variates]
+        let input = Tensor::zeros(
+            (1, config.lookback_len, config.num_variates),
+            candle_core::DType::F32,
+            model.device(),
+        )
+        .unwrap();
+
+        let output = model.forward(&input).unwrap();
+        let dims = output.dims().to_vec();
+
+        // Output should be [batch=1, pred_len, num_variates]
+        assert_eq!(dims[0], 1);
+        assert_eq!(dims[1], config.pred_len);
+        assert_eq!(dims[2], config.num_variates);
     }
 }

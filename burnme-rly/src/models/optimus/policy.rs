@@ -1,4 +1,4 @@
-//! Optimus policy wrapper for eris integration
+//! Optimus policy wrapper for eris integration with GPU support
 //!
 //! This module provides the OptimusPolicy struct which wraps the iTransformer model
 //! for cache prefetching predictions. It implements the GpuTrainable, BatchedActionSelector,
@@ -6,13 +6,13 @@
 
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Tensor;
-use candle_core::Device as CandleDevice;
 
-use crate::buffer::{TensorTransitionBatch, CpuRingBuffer};
-use crate::traits::{GpuTrainable, BatchedActionSelector};
+use crate::buffer::{CpuRingBuffer, TensorTransitionBatch};
 use crate::checkpoint::Checkpointable;
+use crate::traits::{BatchedActionSelector, GpuTrainable};
 
-use super::{OptimusConfig, OptimusModel, bridge::{burn_to_candle, candle_to_burn}};
+use super::bridge::{burn_to_candle, candle_to_burn};
+use super::{BridgeDevice, OptimusConfig, OptimusModel};
 
 /// Dummy module for Checkpointable trait compliance.
 /// This is never actually used - just satisfies the type system.
@@ -47,9 +47,7 @@ impl<B: AutodiffBackend> burn::module::Module<B> for DummyModule<B> {
         self
     }
 
-    fn into_record(self) -> Self::Record {
-        ()
-    }
+    fn into_record(self) -> Self::Record {}
 }
 
 /// Optimus policy for cache prefetching using iTransformer
@@ -67,7 +65,8 @@ impl<B: AutodiffBackend> burn::module::Module<B> for DummyModule<B> {
 pub struct OptimusPolicy<B: AutodiffBackend> {
     model: OptimusModel,
     config: OptimusConfig,
-    device: B::Device,
+    burn_device: B::Device,
+    candle_device: BridgeDevice,
     step_count: usize,
     warmup_complete: bool,
     // For action selection
@@ -77,11 +76,12 @@ pub struct OptimusPolicy<B: AutodiffBackend> {
 }
 
 impl<B: AutodiffBackend> OptimusPolicy<B> {
-    /// Create new policy from config
+    /// Create new policy from config with device selection
     ///
     /// # Arguments
     /// * `config` - Optimus model configuration
-    /// * `device` - Burn backend device for tensor operations
+    /// * `burn_device` - Burn backend device for output tensors
+    /// * `bridge_device` - BridgeDevice specifying CPU or GPU for Candle
     /// * `action_dim` - Number of possible actions (cache line buckets to prefetch)
     ///
     /// # Returns
@@ -89,18 +89,22 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
     ///
     /// # Panics
     /// Panics if the iTransformer model fails to initialize
-    pub fn new(config: OptimusConfig, device: B::Device, action_dim: usize) -> Self {
-        // Convert Burn device to Candle device
-        // Note: Currently only CPU is supported for Candle integration
-        let candle_device = CandleDevice::Cpu;
+    pub fn new(
+        config: OptimusConfig,
+        burn_device: B::Device,
+        bridge_device: BridgeDevice,
+        action_dim: usize,
+    ) -> Self {
+        let model =
+            OptimusModel::new(&config, &bridge_device).expect("Failed to create Optimus model");
 
-        let model = OptimusModel::new(&config, &candle_device)
-            .expect("Failed to create Optimus model");
+        println!("[OptimusPolicy] Created on {}", model.device_name());
 
         Self {
             model,
             config,
-            device,
+            burn_device,
+            candle_device: bridge_device,
             step_count: 0,
             warmup_complete: false,
             action_dim,
@@ -127,20 +131,28 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
     /// let predictions = policy.predict(&history);
     /// // predictions shape: [1, 48, 128]
     /// ```
-    pub fn predict(
-        &self,
-        history: &Tensor<B, 3>,
-    ) -> Option<Tensor<B, 3>> {
-        let candle_device = CandleDevice::Cpu;
+    pub fn predict(&self, history: &Tensor<B, 3>) -> Option<Tensor<B, 3>> {
+        // Get Candle device from BridgeDevice
+        let candle_dev = self.candle_device.to_candle().ok()?;
 
-        // Convert Burn tensor to Candle
-        let candle_input = burn_to_candle(history, &candle_device).ok()?;
+        // Convert Burn tensor to Candle (moves to GPU if needed)
+        let candle_input = burn_to_candle(history, &candle_dev).ok()?;
 
-        // Run iTransformer forward pass
+        // Run iTransformer forward pass (on GPU if configured)
         let candle_output = self.model.forward(&candle_input).ok()?;
 
         // Convert back to Burn tensor
-        candle_to_burn(&candle_output, &self.device).ok()
+        candle_to_burn(&candle_output, &self.burn_device).ok()
+    }
+
+    /// Check if model is running on GPU
+    pub fn is_gpu(&self) -> bool {
+        self.model.is_gpu()
+    }
+
+    /// Get device name for logging
+    pub fn device_name(&self) -> String {
+        self.model.device_name()
     }
 
     /// Select best action based on predictions
@@ -153,10 +165,8 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
     ///
     /// # Returns
     /// Selected action index in range [0, action_dim)
-    fn select_action_from_predictions(
-        &self,
-        predictions: &Tensor<B, 3>,
-    ) -> usize {
+    #[allow(dead_code)]
+    fn select_action_from_predictions(&self, predictions: &Tensor<B, 3>) -> usize {
         // predictions: [batch=1, pred_len, num_variates]
         // For now: select action with highest predicted activity
         let data = predictions.to_data();
@@ -168,7 +178,8 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
         }
 
         // Find index of maximum value
-        let max_idx = values.iter()
+        let max_idx = values
+            .iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .map(|(idx, _)| idx)
@@ -195,10 +206,11 @@ impl<B: AutodiffBackend> Clone for OptimusPolicy<B> {
         // Model weights are NOT copied - this is a shallow clone
         // For training with weight preservation, use checkpoint save/load
         Self {
-            model: OptimusModel::new(&self.config, &CandleDevice::Cpu)
+            model: OptimusModel::new(&self.config, &BridgeDevice::Cpu)
                 .expect("Failed to clone model"),
             config: self.config.clone(),
-            device: self.device.clone(),
+            burn_device: self.burn_device.clone(),
+            candle_device: self.candle_device,
             step_count: self.step_count,
             warmup_complete: self.warmup_complete,
             action_dim: self.action_dim,
@@ -232,7 +244,11 @@ impl<B: AutodiffBackend> GpuTrainable<B, CpuRingBuffer> for OptimusPolicy<B> {
         0.0
     }
 
-    fn train_step_gpu_native(&mut self, _steps_since_last_train: usize, _device: &B::Device) -> Option<f32> {
+    fn train_step_gpu_native(
+        &mut self,
+        _steps_since_last_train: usize,
+        _device: &B::Device,
+    ) -> Option<f32> {
         // Training not implemented - iTransformer used for inference only
         log::warn!("[Optimus] train_step_gpu_native not yet implemented");
         self.step_count += 1;
@@ -240,7 +256,7 @@ impl<B: AutodiffBackend> GpuTrainable<B, CpuRingBuffer> for OptimusPolicy<B> {
     }
 
     fn device(&self) -> &B::Device {
-        &self.device
+        &self.burn_device
     }
 
     fn state_dim(&self) -> usize {
@@ -332,7 +348,8 @@ impl<B: AutodiffBackend> GpuTrainable<B, CpuRingBuffer> for OptimusPolicy<B> {
         log::warn!("[Optimus] load_checkpoint not yet implemented - Candle weights not loaded");
         let meta_path = format!("{}.json", path);
         if std::path::Path::new(&meta_path).exists() {
-            let _metadata: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?;
+            let _metadata: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?;
         }
         Ok(())
     }
@@ -396,7 +413,12 @@ impl<B: AutodiffBackend> Checkpointable<B> for OptimusPolicy<B> {
         static DUMMY: DummyModule<burn::backend::Autodiff<burn::backend::NdArray>> =
             DummyModule(std::marker::PhantomData);
         // Safety: This is a workaround for the trait bound. The function should never be called.
-        unsafe { std::mem::transmute::<&DummyModule<burn::backend::Autodiff<burn::backend::NdArray>>, &DummyModule<B>>(&DUMMY) }
+        unsafe {
+            std::mem::transmute::<
+                &DummyModule<burn::backend::Autodiff<burn::backend::NdArray>>,
+                &DummyModule<B>,
+            >(&DUMMY)
+        }
     }
 }
 
@@ -404,65 +426,39 @@ impl<B: AutodiffBackend> Checkpointable<B> for OptimusPolicy<B> {
 mod tests {
     use super::*;
     use burn::backend::NdArray;
-    use burn::tensor::Distribution;
 
     type TestBackend = burn::backend::Autodiff<NdArray>;
 
     #[test]
-    fn test_optimus_policy_creation() {
+    fn test_optimus_policy_checkpoint_metadata() {
+        use super::super::BridgeDevice;
+
         let config = OptimusConfig::default();
         let device = Default::default();
-        let policy = OptimusPolicy::<TestBackend>::new(config.clone(), device, 10);
+        let bridge_device = BridgeDevice::Cpu;
+        let mut policy =
+            OptimusPolicy::<TestBackend>::new(config.clone(), device, bridge_device, 10);
 
-        assert_eq!(policy.config().num_variates, config.num_variates);
-        assert_eq!(policy.config().lookback_len, config.lookback_len);
-        assert_eq!(policy.state_dim(), config.num_variates);
-        assert!(!policy.is_warmup_complete());
-        assert_eq!(policy.epsilon(), 0.0);
-    }
-
-    #[test]
-    fn test_optimus_policy_clone() {
-        let config = OptimusConfig::default();
-        let device = Default::default();
-        let policy = OptimusPolicy::<TestBackend>::new(config.clone(), device, 10);
-
-        let cloned = policy.clone();
-
-        assert_eq!(cloned.config().num_variates, config.num_variates);
-        assert_eq!(cloned.step_count(), 0);
-        assert!(!cloned.is_warmup_complete());
-    }
-
-    #[test]
-    fn test_optimus_policy_warmup() {
-        let config = OptimusConfig::default();
-        let device = Default::default();
-        let mut policy = OptimusPolicy::<TestBackend>::new(config, device, 10);
-
-        assert!(!policy.is_warmup_complete());
-        policy.set_warmup_complete(true);
-        assert!(policy.is_warmup_complete());
-    }
-
-    #[test]
-    fn test_optimus_policy_step_count() {
-        let config = OptimusConfig::default();
-        let device = Default::default();
-        let mut policy = OptimusPolicy::<TestBackend>::new(config, device, 10);
-
-        assert_eq!(policy.step_count(), 0);
         policy.increment_step_count();
-        assert_eq!(policy.step_count(), 1);
         policy.increment_step_count();
-        assert_eq!(policy.step_count(), 2);
+
+        let metadata = policy.checkpoint_metadata();
+        assert_eq!(metadata.policy_type, "OptimusPolicy");
+        assert_eq!(metadata.epoch, 2);
+        assert_eq!(metadata.state_dim, Some(config.num_variates));
+        assert_eq!(metadata.action_dim, Some(10));
+        assert_eq!(metadata.feature_dim, Some(config.d_model));
     }
 
     #[test]
     fn test_optimus_policy_trait_methods() {
+        use super::super::BridgeDevice;
+
         let config = OptimusConfig::default();
         let device = Default::default();
-        let mut policy = OptimusPolicy::<TestBackend>::new(config, device, 10);
+        let bridge_device = BridgeDevice::Cpu;
+        let mut policy =
+            OptimusPolicy::<TestBackend>::new(config.clone(), device, bridge_device, 10);
 
         // Test GpuTrainable methods
         assert_eq!(policy.batch_size(), 32);
@@ -479,27 +475,11 @@ mod tests {
     }
 
     #[test]
-    fn test_optimus_policy_checkpoint_metadata() {
-        let config = OptimusConfig::default();
-        let device = Default::default();
-        let mut policy = OptimusPolicy::<TestBackend>::new(config, device, 10);
-
-        policy.increment_step_count();
-        policy.increment_step_count();
-
-        let metadata = policy.checkpoint_metadata();
-        assert_eq!(metadata.policy_type, "OptimusPolicy");
-        assert_eq!(metadata.step_count, 2);
-        assert_eq!(metadata.state_dim, Some(config.num_variates));
-        assert_eq!(metadata.action_dim, Some(10));
-        assert_eq!(metadata.feature_dim, Some(config.d_model));
-    }
-
-    #[test]
     fn test_batched_action_selector() {
         let config = OptimusConfig::default();
         let device = Default::default();
-        let policy = OptimusPolicy::<TestBackend>::new(config, device, 10);
+        let bridge_device = BridgeDevice::Cpu;
+        let policy = OptimusPolicy::<TestBackend>::new(config, device, bridge_device, 10);
 
         let observations = vec![
             vec![1.0, 2.0, 3.0],

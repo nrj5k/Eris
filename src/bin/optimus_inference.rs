@@ -10,7 +10,7 @@ mod optimus_impl {
     use clap::Parser;
     use std::path::Path;
 
-    use burnme_rly::models::optimus::{OptimusConfig, OptimusPolicy};
+    use burnme_rly::models::optimus::{OptimusConfig, OptimusPolicy, BridgeDevice, parse_device_str};
     use burnme_rly::traits::GpuTrainable;
 
     type B = Autodiff<NdArray>;
@@ -42,6 +42,10 @@ mod optimus_impl {
         /// Output predictions to file
         #[arg(long)]
         output: Option<String>,
+
+        /// Device for computation (cpu, cuda, cuda:0, cuda:1)
+        #[arg(long, default_value = "auto")]
+        device: String,
     }
 
     /// Generate synthetic cache access history
@@ -88,12 +92,24 @@ mod optimus_impl {
         println!("  lookback_len: {}", config.lookback_len);
         println!("  pred_len: {}", config.pred_len);
 
+        // Parse device string
+        let bridge_device = match args.device.as_str() {
+            "auto" => BridgeDevice::auto(),
+            _ => parse_device_str(&args.device)
+                .unwrap_or_else(|| {
+                    eprintln!("[WARN] Unknown device '{}', using auto", args.device);
+                    BridgeDevice::auto()
+                }),
+        };
+
+        println!("Using device: {:?}", bridge_device);
+
         // Create device
         let device = <B as Backend>::Device::default();
 
         // Create policy
         let action_dim = 10;
-        let mut policy = OptimusPolicy::<B>::new(config.clone(), device.clone(), action_dim);
+        let mut policy = OptimusPolicy::<B>::new(config.clone(), device.clone(), bridge_device, action_dim);
 
         // Load checkpoint if exists
         let checkpoint_path = Path::new(&args.checkpoint);
