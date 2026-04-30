@@ -1,18 +1,17 @@
 //! Train Optimus iTransformer model for cache prefetching
-//! 
+//!
 //! Usage:
 //!   cargo run --bin train_optimus --features optimus -- --config config.toml --epochs 100
 
 #[cfg(feature = "optimus")]
 mod optimus_impl {
-    use clap::Parser;
-    use burn::backend::NdArray;
-    use burn::backend::Autodiff;
+    use burn::backend::{Autodiff, NdArray};
     use burn::tensor::backend::Backend;
-    
-    use burnme_rly::models::optimus::{OptimusConfig, OptimusPolicy, BridgeDevice, parse_device_str};
+    use clap::Parser;
+
+    use burnme_rly::models::optimus::{resolve_device, OptimusConfig, OptimusPolicy};
     use burnme_rly::traits::GpuTrainable;
-    
+
     #[derive(Parser, Debug)]
     #[command(name = "train_optimus")]
     #[command(about = "Train Optimus iTransformer for cache prefetching")]
@@ -20,82 +19,65 @@ mod optimus_impl {
         /// Configuration file path
         #[arg(short, long, default_value = "config/optimus.toml")]
         config: String,
-        
+
         /// Number of training epochs
         #[arg(short, long, default_value = "100")]
         epochs: usize,
-        
+
         /// Batch size
         #[arg(short, long, default_value = "32")]
         batch_size: usize,
-        
+
         /// Learning rate
         #[arg(long, default_value = "0.0001")]
         learning_rate: f64,
-        
+
         /// Checkpoint directory
         #[arg(long, default_value = "checkpoints/optimus")]
         checkpoint_dir: String,
-        
+
         /// Device for computation (cpu, cuda, cuda:0, cuda:1)
         #[arg(long, default_value = "auto")]
         device: String,
     }
-    
+
     pub fn main() {
         let args = Args::parse();
-        
+
         println!("=== Training Optimus iTransformer ===");
         println!("Config: {}", args.config);
         println!("Epochs: {}", args.epochs);
         println!("Batch size: {}", args.batch_size);
         println!("Learning rate: {}", args.learning_rate);
-        
+
         // Create config
         let config = OptimusConfig::new()
             .with_num_variates(128)
             .with_lookback_len(96)
             .with_pred_len(48);
-        
+
         config.validate().expect("Invalid config");
-        
-        println!("\nConfig:");
-        println!("  num_variates: {}", config.num_variates);
-        println!("  lookback_len: {}", config.lookback_len);
-        println!("  pred_len: {}", config.pred_len);
-        println!("  d_model: {}", config.d_model);
-        println!("  n_heads: {}", config.n_heads);
-        println!("  n_layers: {}", config.n_layers);
-        
-        // Parse device string
-        let bridge_device = match args.device.as_str() {
-            "auto" => BridgeDevice::auto(),
-            _ => parse_device_str(&args.device)
-                .unwrap_or_else(|| {
-                    eprintln!("[WARN] Unknown device '{}', using auto", args.device);
-                    BridgeDevice::auto()
-                }),
-        };
-        
+
+        // Use Display trait for config printing (DRY!)
+        println!("\nConfig:\n{}", config);
+
+        // Use shared utility for device resolution (DRY!)
+        let bridge_device = resolve_device(&args.device);
         println!("Using device: {:?}", bridge_device);
-        
+
         // Create device with autodiff backend
         type TestBackend = Autodiff<NdArray>;
         let device = <TestBackend as Backend>::Device::default();
-        
+
         // Create policy
         let action_dim = 10; // Number of cache actions
-        let policy = OptimusPolicy::<TestBackend>::new(
-            config,
-            device.clone(),
-            bridge_device,
-            action_dim,
-        );
-        
+        let policy =
+            OptimusPolicy::<TestBackend>::new(config, device.clone(), bridge_device, action_dim);
+
         println!("\nOptimus policy created!");
         println!("Note: Full training loop requires implementing backward pass");
         println!("through Candle. Current implementation provides inference only.");
-        
+
         // TODO: Implement training loop
         // 1. Load trace data
         // 2. Create time windows
@@ -106,18 +88,18 @@ mod optimus_impl {
         //    - Backward pass (requires Candle gradients → Burn)
         //    - Update weights
         // 4. Save checkpoint
-        
+
         println!("\n[TRAINING] Not yet fully implemented");
         println!("[INFO] Current implementation supports inference only");
         println!("[TODO] Implement backward pass for training");
-        
+
         // Save initial checkpoint
         std::fs::create_dir_all(&args.checkpoint_dir).ok();
         let checkpoint_path = format!("{}/optimus_initial", args.checkpoint_dir);
         if let Err(e) = policy.save_checkpoint(&checkpoint_path) {
             eprintln!("[WARN] Failed to save checkpoint: {}", e);
         }
-        
+
         println!("\nCheckpoint saved to: {}/", args.checkpoint_dir);
         println!("Training complete!");
     }

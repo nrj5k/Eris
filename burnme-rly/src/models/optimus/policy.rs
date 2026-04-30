@@ -14,42 +14,6 @@ use crate::traits::{BatchedActionSelector, GpuTrainable};
 use super::bridge::{burn_to_candle, candle_to_burn};
 use super::{BridgeDevice, OptimusConfig, OptimusModel};
 
-/// Dummy module for Checkpointable trait compliance.
-/// This is never actually used - just satisfies the type system.
-/// The Checkpointable::model() method should never be called for OptimusPolicy.
-#[derive(Debug, Clone)]
-struct DummyModule<B: AutodiffBackend>(std::marker::PhantomData<B>);
-
-impl<B: AutodiffBackend> burn::module::Module<B> for DummyModule<B> {
-    type Record = ();
-
-    fn collect_devices(&self, _devices: Vec<B::Device>) -> Vec<B::Device> {
-        vec![]
-    }
-
-    fn fork(self, _device: &B::Device) -> Self {
-        self
-    }
-
-    fn to_device(self, _device: &B::Device) -> Self {
-        self
-    }
-
-    fn visit<V: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut V) {
-        // No parameters to visit
-    }
-
-    fn map<M: burn::module::ModuleMapper<B>>(self, _mapper: &mut M) -> Self {
-        self
-    }
-
-    fn load_record(self, _record: Self::Record) -> Self {
-        self
-    }
-
-    fn into_record(self) -> Self::Record {}
-}
-
 /// Optimus policy for cache prefetching using iTransformer
 ///
 /// This policy wraps the iTransformer model for time-series forecasting of cache accesses.
@@ -66,7 +30,7 @@ pub struct OptimusPolicy<B: AutodiffBackend> {
     model: OptimusModel,
     config: OptimusConfig,
     burn_device: B::Device,
-    candle_device: BridgeDevice,
+    bridge_device: BridgeDevice,
     step_count: usize,
     warmup_complete: bool,
     // For action selection
@@ -104,7 +68,7 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
             model,
             config,
             burn_device,
-            candle_device: bridge_device,
+            bridge_device,
             step_count: 0,
             warmup_complete: false,
             action_dim,
@@ -133,7 +97,7 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
     /// ```
     pub fn predict(&self, history: &Tensor<B, 3>) -> Option<Tensor<B, 3>> {
         // Get Candle device from BridgeDevice
-        let candle_dev = self.candle_device.to_candle().ok()?;
+        let candle_dev = self.bridge_device.to_candle().ok()?;
 
         // Convert Burn tensor to Candle (moves to GPU if needed)
         let candle_input = burn_to_candle(history, &candle_dev).ok()?;
@@ -210,7 +174,7 @@ impl<B: AutodiffBackend> Clone for OptimusPolicy<B> {
                 .expect("Failed to clone model"),
             config: self.config.clone(),
             burn_device: self.burn_device.clone(),
-            candle_device: self.candle_device,
+            bridge_device: self.bridge_device,
             step_count: self.step_count,
             warmup_complete: self.warmup_complete,
             action_dim: self.action_dim,
@@ -399,26 +363,40 @@ impl<B: AutodiffBackend> Checkpointable<B> for OptimusPolicy<B> {
     }
 
     fn model(&self) -> &impl burn::module::Module<B> {
-        // iTransformer uses Candle, not Burn modules
-        // This is a limitation - we cannot return a Burn Module
-        // because the underlying model is a Candle model
-        //
-        // For trait compliance, we return a dummy module
-        // In practice, checkpointing should use the Candle VarMap directly
-        // via save_checkpoint()/load_checkpoint() methods.
-        //
-        // Note: This function should never be called for OptimusPolicy
-        // as it uses Candle internally, not Burn modules.
-        // The static dummy satisfies the trait bound for any B: AutodiffBackend.
-        static DUMMY: DummyModule<burn::backend::Autodiff<burn::backend::NdArray>> =
-            DummyModule(std::marker::PhantomData);
-        // Safety: This is a workaround for the trait bound. The function should never be called.
-        unsafe {
-            std::mem::transmute::<
-                &DummyModule<burn::backend::Autodiff<burn::backend::NdArray>>,
-                &DummyModule<B>,
-            >(&DUMMY)
+        // OptimusPolicy uses Candle internally, not Burn modules.
+        // This method should never be called.
+        // Use save_checkpoint()/load_checkpoint() for persistence.
+        // Dummy type to satisfy trait bounds - panic ensures it's never used.
+        #[derive(Debug, Clone)]
+        struct Dummy<B: AutodiffBackend>(std::marker::PhantomData<B>);
+        impl<B: AutodiffBackend> burn::module::Module<B> for Dummy<B> {
+            type Record = ();
+            fn collect_devices(&self, _: Vec<B::Device>) -> Vec<B::Device> {
+                vec![]
+            }
+            fn fork(self, _: &B::Device) -> Self {
+                self
+            }
+            fn to_device(self, _: &B::Device) -> Self {
+                self
+            }
+            fn visit<V: burn::module::ModuleVisitor<B>>(&self, _: &mut V) {}
+            fn map<M: burn::module::ModuleMapper<B>>(self, _: &mut M) -> Self {
+                self
+            }
+            fn load_record(self, _: Self::Record) -> Self {
+                self
+            }
+            fn into_record(self) -> Self::Record {}
         }
+        // Create dummy to satisfy return type, then panic
+        let _dummy: Dummy<B> = Dummy(std::marker::PhantomData);
+        panic!(
+            "OptimusPolicy::model() should never be called. \
+             Use save_checkpoint()/load_checkpoint() for persistence."
+        );
+        #[allow(unreachable_code)]
+        &_dummy
     }
 }
 

@@ -82,3 +82,47 @@ impl OptimusConfig {
         Ok(())
     }
 }
+
+impl std::fmt::Display for OptimusConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "OptimusConfig {{\n\
+             num_variates: {},\n\
+             lookback_len: {},\n\
+             pred_len: {},\n\
+             d_model: {},\n\
+             n_heads: {},\n\
+             n_layers: {},\n\
+             d_ff: {},\n\
+             dropout: {:.2},\n\
+             use_revin: {}\n\
+             }}",
+            self.num_variates,
+            self.lookback_len,
+            self.pred_len,
+            self.d_model,
+            self.n_heads,
+            self.n_layers,
+            self.d_ff,
+            self.dropout,
+            self.use_revin
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_display() {
+        let config = OptimusConfig::default();
+        let output = format!("{}", config);
+
+        assert!(output.contains("num_variates:"));
+        assert!(output.contains("lookback_len:"));
+        assert!(output.contains("d_model:"));
+        assert!(output.contains("OptimusConfig"));
+    }
+}

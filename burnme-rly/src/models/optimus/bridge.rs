@@ -32,6 +32,11 @@ impl BridgeDevice {
         }
     }
 
+    /// Check if device is CUDA
+    pub fn is_cuda(&self) -> bool {
+        matches!(self, BridgeDevice::Cuda(_))
+    }
+
     /// Detect best available device
     pub fn auto() -> Self {
         #[cfg(feature = "cuda")]

@@ -15,6 +15,10 @@ pub use self::{
     config::OptimusConfig,
     model::OptimusModel,
     policy::OptimusPolicy,
+    utils::{
+        format_inference_summary, generate_synthetic_history, history_to_tensor, resolve_device,
+        select_action_from_predictions,
+    },
 };
 
 #[cfg(feature = "optimus")]
@@ -25,6 +29,8 @@ mod config;
 mod model;
 #[cfg(feature = "optimus")]
 mod policy;
+#[cfg(feature = "optimus")]
+pub mod utils;
 
 // Stub when feature disabled
 #[cfg(not(feature = "optimus"))]
