@@ -27,6 +27,7 @@ cuda = [
   "burn/train",
   "burn/dataset",
   "burn/fusion",
+  "burnme-rly/cuda",
 ]
 rocm = [
   "burn/rocm",
@@ -46,7 +47,7 @@ parallel = ["rayon"]
 spirv = ["wgpu", "burn/ir"]
 
 # Optimus iTransformer feature
-optimus = ["burnme-rly/optimus"]
+optimus = ["burnme-rly/optimus", "burnme-rly/cuda"]
 
 [dependencies]
 burnme-rly = { path = "burnme-rly" }
