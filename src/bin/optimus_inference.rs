@@ -11,7 +11,7 @@ mod optimus_impl {
     use std::path::Path;
 
     use burnme_rly::models::optimus::{
-        format_inference_summary, generate_synthetic_history, history_to_tensor, resolve_device,
+        device_name, format_inference_summary, generate_synthetic_history, history_to_tensor,
         OptimusConfig, OptimusPolicy,
     };
     use burnme_rly::traits::GpuTrainable;
@@ -45,10 +45,7 @@ mod optimus_impl {
         /// Output predictions to file
         #[arg(long)]
         output: Option<String>,
-
-        /// Device for computation (cpu, cuda, cuda:0, cuda:1)
-        #[arg(long, default_value = "auto")]
-        device: String,
+        // Note: No --device flag needed! Device is auto-detected from Burn backend.
     }
 
     pub fn main() {
@@ -67,16 +64,15 @@ mod optimus_impl {
         // Use Display trait (DRY!)
         println!("\nConfig:\n{}", config);
 
-        // Use shared utility for device resolution (DRY!)
-        let bridge_device = resolve_device(&args.device);
-        println!("\nDevice: {:?}", bridge_device);
-
-        // Create device
+        // Create device - device selection is automatic based on Burn backend
         let device = <B as Backend>::Device::default();
 
-        // Create policy
+        // Log device info
+        println!("\nDevice: {}", device_name::<B>(&device));
+
+        // Create policy - no bridge_device needed, auto-detected from Burn device
         let action_dim = 10;
-        let mut policy = OptimusPolicy::<B>::new(config.clone(), device, bridge_device, action_dim);
+        let mut policy = OptimusPolicy::<B>::new(config.clone(), device, action_dim);
 
         // Load checkpoint if exists
         let checkpoint_path = Path::new(&args.checkpoint);

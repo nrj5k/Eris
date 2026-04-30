@@ -1,6 +1,8 @@
 //! Optimus iTransformer model using Candle with GPU support
+//!
+//! Device selection is automatic based on the Burn backend device.
+//! Pass the CandleDevice directly (obtained via burn_device_to_candle()).
 
-use super::bridge::BridgeDevice;
 use super::config::OptimusConfig;
 use candle_core::{Device as CandleDevice, Tensor};
 use candle_nn::VarBuilder;
@@ -14,21 +16,26 @@ pub struct OptimusModel {
 }
 
 impl OptimusModel {
-    /// Create new Optimus model from config with device selection
+    /// Create new Optimus model from config with Candle device
     ///
     /// # Arguments
     /// * `config` - Model configuration
-    /// * `bridge_device` - BridgeDevice specifying CPU or GPU
+    /// * `candle_device` - Candle device (CPU or CUDA) for model computation
     ///
     /// # Returns
     /// Result containing OptimusModel or error
-    pub fn new(config: &OptimusConfig, bridge_device: &BridgeDevice) -> candle_core::Result<Self> {
-        // Convert to Candle device (CPU or CUDA)
-        let candle_device = bridge_device.to_candle()?;
-
+    ///
+    /// # Examples
+    /// ```ignore
+    /// use burnme_rly::models::optimus::burn_device_to_candle;
+    /// let burn_device = <NdArray as Backend>::Device::default();
+    /// let candle_device = burn_device_to_candle(&burn_device)?;
+    /// let model = OptimusModel::new(&config, &candle_device)?;
+    /// ```
+    pub fn new(config: &OptimusConfig, candle_device: &CandleDevice) -> candle_core::Result<Self> {
         // Create varmap for parameters
         let varmap = candle_nn::VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &candle_device);
+        let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, candle_device);
 
         // Create iTransformer
         let inner = ITransformer::new(
@@ -48,7 +55,7 @@ impl OptimusModel {
             Some(config.use_revin),
             None,  // revin_affine
             false, // flash_attn
-            &candle_device,
+            candle_device,
         )?;
 
         println!("[Optimus] Model created on device: {:?}", candle_device);
@@ -56,7 +63,7 @@ impl OptimusModel {
         Ok(Self {
             inner,
             config: config.clone(),
-            device: candle_device,
+            device: candle_device.clone(),
         })
     }
 
@@ -123,7 +130,7 @@ mod tests {
     #[test]
     fn test_model_creation_cpu() {
         let config = test_config();
-        let device = BridgeDevice::Cpu;
+        let device = CandleDevice::Cpu;
         let model = OptimusModel::new(&config, &device);
         assert!(model.is_ok());
         let model = model.unwrap();
@@ -134,7 +141,7 @@ mod tests {
     #[test]
     fn test_forward_shape() {
         let config = test_config();
-        let device = BridgeDevice::Cpu;
+        let device = CandleDevice::Cpu;
         let model = OptimusModel::new(&config, &device).unwrap();
 
         // Create test input: [batch=1, lookback_len, num_variates]

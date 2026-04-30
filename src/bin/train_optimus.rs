@@ -9,7 +9,7 @@ mod optimus_impl {
     use burn::tensor::backend::Backend;
     use clap::Parser;
 
-    use burnme_rly::models::optimus::{resolve_device, OptimusConfig, OptimusPolicy};
+    use burnme_rly::models::optimus::{device_name, OptimusConfig, OptimusPolicy};
     use burnme_rly::traits::GpuTrainable;
 
     #[derive(Parser, Debug)]
@@ -35,10 +35,7 @@ mod optimus_impl {
         /// Checkpoint directory
         #[arg(long, default_value = "checkpoints/optimus")]
         checkpoint_dir: String,
-
-        /// Device for computation (cpu, cuda, cuda:0, cuda:1)
-        #[arg(long, default_value = "auto")]
-        device: String,
+        // Note: No --device flag needed! Device is auto-detected from Burn backend.
     }
 
     pub fn main() {
@@ -61,18 +58,16 @@ mod optimus_impl {
         // Use Display trait for config printing (DRY!)
         println!("\nConfig:\n{}", config);
 
-        // Use shared utility for device resolution (DRY!)
-        let bridge_device = resolve_device(&args.device);
-        println!("Using device: {:?}", bridge_device);
-
-        // Create device with autodiff backend
+        // Create device with autodiff backend - device selection is automatic
         type TestBackend = Autodiff<NdArray>;
         let device = <TestBackend as Backend>::Device::default();
 
-        // Create policy
+        // Log device info
+        println!("Using device: {}", device_name::<TestBackend>(&device));
+
+        // Create policy - no bridge_device needed, auto-detected from Burn device
         let action_dim = 10; // Number of cache actions
-        let policy =
-            OptimusPolicy::<TestBackend>::new(config, device.clone(), bridge_device, action_dim);
+        let policy = OptimusPolicy::<TestBackend>::new(config, device.clone(), action_dim);
 
         println!("\nOptimus policy created!");
         println!("Note: Full training loop requires implementing backward pass");

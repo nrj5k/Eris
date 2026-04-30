@@ -2,24 +2,38 @@
 //!
 //! Provides common functions used across binaries and library code
 //! to avoid DRY violations.
+//!
+//! # Device Selection
+//! Device selection is now automatic based on the Burn backend device.
+//! The `resolve_device` function is deprecated and kept only for backward compatibility.
 
-use crate::models::optimus::bridge::BridgeDevice;
 use burn::tensor::{backend::Backend, Shape, Tensor, TensorData};
 
 /// Parse device string with auto-detection fallback.
 ///
-/// Supports: "auto", "cpu", "cuda", "cuda:N"
-/// Unknown strings fall back to BridgeDevice::auto() with warning.
+/// DEPRECATED: Device selection is now automatic based on the Burn backend.
+/// This function is kept for backward compatibility but should not be used in new code.
 ///
 /// # Examples
+/// ```ignore
+/// // OLD (deprecated):
+/// let device = resolve_device("cuda:0");
+///
+/// // NEW (automatic):
+/// let device = <NdArray as Backend>::Device::default();
+/// // Candle device is auto-detected from Burn device
 /// ```
-/// let device = resolve_device("cuda:0");  // GPU device 0
-/// let device = resolve_device("auto");     // Auto-detect best available
-/// ```
-pub fn resolve_device(device_str: &str) -> BridgeDevice {
+#[deprecated(
+    since = "0.1.0",
+    note = "Device selection is now automatic. Use Burn backend device directly."
+)]
+pub fn resolve_device(device_str: &str) -> crate::models::optimus::bridge::BridgeDevice {
+    use crate::models::optimus::bridge::BridgeDevice;
+
+    #[allow(deprecated)]
     match device_str.to_lowercase().as_str() {
         "auto" => BridgeDevice::auto(),
-        s => super::bridge::parse_device_str(s).unwrap_or_else(|| {
+        s => crate::models::optimus::bridge::parse_device_str(s).unwrap_or_else(|| {
             eprintln!("[WARN] Unknown device '{}', using auto", s);
             BridgeDevice::auto()
         }),
@@ -143,19 +157,24 @@ mod tests {
     use burn::backend::NdArray;
 
     #[test]
+    #[allow(deprecated)]
     fn test_resolve_device_auto() {
         let device = resolve_device("auto");
         // Should not panic
+        #[allow(deprecated)]
         let _ = device.to_candle();
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_resolve_device_cpu() {
         let device = resolve_device("cpu");
+        #[allow(deprecated)]
         assert!(!device.is_cuda());
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_resolve_device_unknown() {
         // Should fallback to auto
         let _ = resolve_device("unknown_device");

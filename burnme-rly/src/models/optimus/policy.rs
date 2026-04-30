@@ -11,8 +11,8 @@ use crate::buffer::{CpuRingBuffer, TensorTransitionBatch};
 use crate::checkpoint::Checkpointable;
 use crate::traits::{BatchedActionSelector, GpuTrainable};
 
-use super::bridge::{burn_to_candle, candle_to_burn};
-use super::{BridgeDevice, OptimusConfig, OptimusModel};
+use super::bridge::{burn_device_to_candle, burn_to_candle, candle_to_burn, device_name};
+use super::{OptimusConfig, OptimusModel};
 
 /// Optimus policy for cache prefetching using iTransformer
 ///
@@ -26,11 +26,14 @@ use super::{BridgeDevice, OptimusConfig, OptimusModel};
 /// - Input: [batch, num_variates, lookback_len] - historical cache access patterns
 /// - Output: [batch, pred_len, num_variates] - predicted future cache accesses
 /// - Action selection: argmax over predicted values to select prefetch candidates
+///
+/// # Device Selection
+/// The Candle device is automatically derived from the Burn backend device.
+/// No separate device specification is needed.
 pub struct OptimusPolicy<B: AutodiffBackend> {
     model: OptimusModel,
     config: OptimusConfig,
     burn_device: B::Device,
-    bridge_device: BridgeDevice,
     step_count: usize,
     warmup_complete: bool,
     // For action selection
@@ -40,35 +43,39 @@ pub struct OptimusPolicy<B: AutodiffBackend> {
 }
 
 impl<B: AutodiffBackend> OptimusPolicy<B> {
-    /// Create new policy from config with device selection
+    /// Create new policy from config with automatic device detection
     ///
     /// # Arguments
     /// * `config` - Optimus model configuration
     /// * `burn_device` - Burn backend device for output tensors
-    /// * `bridge_device` - BridgeDevice specifying CPU or GPU for Candle
     /// * `action_dim` - Number of possible actions (cache line buckets to prefetch)
     ///
     /// # Returns
     /// A new OptimusPolicy instance with initialized model
     ///
+    /// # Device Selection
+    /// The Candle device is automatically derived from the Burn backend device.
+    /// If CUDA feature is enabled and available, GPU will be used. Otherwise falls back to CPU.
+    ///
     /// # Panics
     /// Panics if the iTransformer model fails to initialize
-    pub fn new(
-        config: OptimusConfig,
-        burn_device: B::Device,
-        bridge_device: BridgeDevice,
-        action_dim: usize,
-    ) -> Self {
-        let model =
-            OptimusModel::new(&config, &bridge_device).expect("Failed to create Optimus model");
+    pub fn new(config: OptimusConfig, burn_device: B::Device, action_dim: usize) -> Self {
+        // Auto-detect Candle device from Burn device
+        let candle_device =
+            burn_device_to_candle::<B>(&burn_device).unwrap_or(candle_core::Device::Cpu);
 
-        println!("[OptimusPolicy] Created on {}", model.device_name());
+        let model =
+            OptimusModel::new(&config, &candle_device).expect("Failed to create Optimus model");
+
+        println!(
+            "[OptimusPolicy] Created on {}",
+            device_name::<B>(&burn_device)
+        );
 
         Self {
             model,
             config,
             burn_device,
-            bridge_device,
             step_count: 0,
             warmup_complete: false,
             action_dim,
@@ -96,8 +103,8 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
     /// // predictions shape: [1, 48, 128]
     /// ```
     pub fn predict(&self, history: &Tensor<B, 3>) -> Option<Tensor<B, 3>> {
-        // Get Candle device from BridgeDevice
-        let candle_dev = self.bridge_device.to_candle().ok()?;
+        // Auto-detect Candle device from Burn device
+        let candle_dev = burn_device_to_candle::<B>(&self.burn_device).ok()?;
 
         // Convert Burn tensor to Candle (moves to GPU if needed)
         let candle_input = burn_to_candle(history, &candle_dev).ok()?;
@@ -108,59 +115,6 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
         // Convert back to Burn tensor
         candle_to_burn(&candle_output, &self.burn_device).ok()
     }
-
-    /// Check if model is running on GPU
-    pub fn is_gpu(&self) -> bool {
-        self.model.is_gpu()
-    }
-
-    /// Get device name for logging
-    pub fn device_name(&self) -> String {
-        self.model.device_name()
-    }
-
-    /// Select best action based on predictions
-    ///
-    /// Uses argmax heuristic over the last prediction timestep to select
-    /// the cache line bucket with highest predicted activity.
-    ///
-    /// # Arguments
-    /// * `predictions` - Model output tensor with shape [batch=1, pred_len, num_variates]
-    ///
-    /// # Returns
-    /// Selected action index in range [0, action_dim)
-    #[allow(dead_code)]
-    fn select_action_from_predictions(&self, predictions: &Tensor<B, 3>) -> usize {
-        // predictions: [batch=1, pred_len, num_variates]
-        // For now: select action with highest predicted activity
-        let data = predictions.to_data();
-        let values: Vec<f32> = data.to_vec().unwrap_or_default();
-
-        // Simple heuristic: argmax over last prediction step
-        if values.is_empty() {
-            return 0;
-        }
-
-        // Find index of maximum value
-        let max_idx = values
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-
-        max_idx % self.action_dim
-    }
-
-    /// Get model reference
-    pub fn model(&self) -> &OptimusModel {
-        &self.model
-    }
-
-    /// Get config reference
-    pub fn config(&self) -> &OptimusConfig {
-        &self.config
-    }
 }
 
 // Manual clone for non-AutodiffBackend
@@ -169,12 +123,14 @@ impl<B: AutodiffBackend> Clone for OptimusPolicy<B> {
         // Note: This creates a new model instance with same config
         // Model weights are NOT copied - this is a shallow clone
         // For training with weight preservation, use checkpoint save/load
+        // Auto-detect Candle device from Burn device (same as new())
+        let candle_device =
+            burn_device_to_candle::<B>(&self.burn_device).unwrap_or(candle_core::Device::Cpu);
+
         Self {
-            model: OptimusModel::new(&self.config, &BridgeDevice::Cpu)
-                .expect("Failed to clone model"),
+            model: OptimusModel::new(&self.config, &candle_device).expect("Failed to clone model"),
             config: self.config.clone(),
             burn_device: self.burn_device.clone(),
-            bridge_device: self.bridge_device,
             step_count: self.step_count,
             warmup_complete: self.warmup_complete,
             action_dim: self.action_dim,
@@ -409,13 +365,9 @@ mod tests {
 
     #[test]
     fn test_optimus_policy_checkpoint_metadata() {
-        use super::super::BridgeDevice;
-
         let config = OptimusConfig::default();
         let device = Default::default();
-        let bridge_device = BridgeDevice::Cpu;
-        let mut policy =
-            OptimusPolicy::<TestBackend>::new(config.clone(), device, bridge_device, 10);
+        let mut policy = OptimusPolicy::<TestBackend>::new(config.clone(), device, 10);
 
         policy.increment_step_count();
         policy.increment_step_count();
@@ -430,13 +382,9 @@ mod tests {
 
     #[test]
     fn test_optimus_policy_trait_methods() {
-        use super::super::BridgeDevice;
-
         let config = OptimusConfig::default();
         let device = Default::default();
-        let bridge_device = BridgeDevice::Cpu;
-        let mut policy =
-            OptimusPolicy::<TestBackend>::new(config.clone(), device, bridge_device, 10);
+        let mut policy = OptimusPolicy::<TestBackend>::new(config.clone(), device, 10);
 
         // Test GpuTrainable methods
         assert_eq!(policy.batch_size(), 32);
@@ -456,8 +404,7 @@ mod tests {
     fn test_batched_action_selector() {
         let config = OptimusConfig::default();
         let device = Default::default();
-        let bridge_device = BridgeDevice::Cpu;
-        let policy = OptimusPolicy::<TestBackend>::new(config, device, bridge_device, 10);
+        let policy = OptimusPolicy::<TestBackend>::new(config, device, 10);
 
         let observations = vec![
             vec![1.0, 2.0, 3.0],
