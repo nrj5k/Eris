@@ -5,7 +5,6 @@
 
 #[cfg(feature = "optimus")]
 mod optimus_impl {
-    use burn::backend::{Autodiff, NdArray};
     use burn::tensor::backend::Backend;
     use clap::Parser;
     use std::path::Path;
@@ -16,7 +15,14 @@ mod optimus_impl {
     };
     use burnme_rly::traits::GpuTrainable;
 
-    type B = Autodiff<NdArray>;
+    // DIAGNOSTIC: Select backend based on feature flags
+    // When cuda feature is enabled, use Cuda backend for GPU computation
+    // Otherwise fall back to NdArray (CPU)
+    #[cfg(all(feature = "cuda", feature = "optimus"))]
+    type B = burn::backend::Autodiff<burn::backend::Cuda>;
+
+    #[cfg(all(not(feature = "cuda"), feature = "optimus"))]
+    type B = burn::backend::Autodiff<burn::backend::NdArray>;
 
     #[derive(Parser, Debug)]
     #[command(name = "optimus_inference")]

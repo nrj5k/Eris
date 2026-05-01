@@ -47,7 +47,8 @@ parallel = ["rayon"]
 spirv = ["wgpu", "burn/ir"]
 
 # Optimus iTransformer feature
-optimus = ["burnme-rly/optimus", "burnme-rly/cuda"]
+# Note: CUDA is optional - use "optimus,cuda" for GPU support
+optimus = ["burnme-rly/optimus"]
 
 [dependencies]
 burnme-rly = { path = "burnme-rly" }

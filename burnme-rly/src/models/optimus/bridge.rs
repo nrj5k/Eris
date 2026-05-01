@@ -144,8 +144,19 @@ pub fn burn_to_candle<B: Backend>(
     tensor: &Tensor<B, 3>,
     device: &CandleDevice,
 ) -> candle_core::Result<CandleTensor> {
-    let data = tensor.to_data();
+    // DIAGNOSTIC: Log input tensor info
     let dims: [usize; 3] = tensor.shape().dims();
+    log::debug!(
+        "[BRIDGE] Converting Burn tensor to Candle. Shape: [{}, {}, {}], Target device: {:?}",
+        dims[0],
+        dims[1],
+        dims[2],
+        device
+    );
+
+    // Note: to_data() always copies to host memory
+    // This is a limitation of Burn→Candle conversion
+    let data = tensor.to_data();
 
     // Convert to f32 slice
     let values: Vec<f32> = data
@@ -153,7 +164,15 @@ pub fn burn_to_candle<B: Backend>(
         .map_err(|e| candle_core::Error::Msg(format!("Failed to convert tensor data: {}", e)))?;
 
     // Create tensor on specified device
-    CandleTensor::from_vec(values, dims.to_vec(), device)
+    let candle_tensor = CandleTensor::from_vec(values, dims.to_vec(), device)?;
+
+    // DIAGNOSTIC: Verify output tensor device
+    log::debug!(
+        "[BRIDGE] Candle tensor created on device: {:?}",
+        candle_tensor.device()
+    );
+
+    Ok(candle_tensor)
 }
 
 /// Convert Candle tensor to Burn tensor

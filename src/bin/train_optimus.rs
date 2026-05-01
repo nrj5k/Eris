@@ -5,12 +5,20 @@
 
 #[cfg(feature = "optimus")]
 mod optimus_impl {
-    use burn::backend::{Autodiff, NdArray};
     use burn::tensor::backend::Backend;
     use clap::Parser;
 
     use burnme_rly::models::optimus::{device_name, OptimusConfig, OptimusPolicy};
     use burnme_rly::traits::GpuTrainable;
+
+    // DIAGNOSTIC: Select backend based on feature flags
+    // When cuda feature is enabled, use Cuda backend for GPU computation
+    // Otherwise fall back to NdArray (CPU)
+    #[cfg(all(feature = "cuda", feature = "optimus"))]
+    type TestBackend = burn::backend::Autodiff<burn::backend::Cuda>;
+
+    #[cfg(all(not(feature = "cuda"), feature = "optimus"))]
+    type TestBackend = burn::backend::Autodiff<burn::backend::NdArray>;
 
     #[derive(Parser, Debug)]
     #[command(name = "train_optimus")]
@@ -63,8 +71,14 @@ mod optimus_impl {
         println!("\nConfig:\n{}", config);
 
         // Create device with autodiff backend - device selection is automatic
-        type TestBackend = Autodiff<NdArray>;
+        // TestBackend type alias is defined at module level based on feature flags
         let device = <TestBackend as Backend>::Device::default();
+
+        // DIAGNOSTIC: Log backend type
+        #[cfg(feature = "cuda")]
+        println!("Backend: CUDA (GPU)");
+        #[cfg(not(feature = "cuda"))]
+        println!("Backend: NdArray (CPU)");
 
         // Log device info
         println!("Using device: {}", device_name::<TestBackend>(&device));

@@ -119,6 +119,13 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
         // Auto-detect Candle device from Burn device
         let candle_dev = burn_device_to_candle::<B>(&self.burn_device).ok()?;
 
+        // DIAGNOSTIC: Log prediction pipeline start
+        log::debug!(
+            "[POLICY] Starting prediction. Burn device: {:?}, Candle device: {:?}",
+            self.burn_device,
+            candle_dev
+        );
+
         // Convert Burn tensor to Candle (moves to GPU if needed)
         let candle_input = burn_to_candle(history, &candle_dev).ok()?;
 
@@ -126,7 +133,12 @@ impl<B: AutodiffBackend> OptimusPolicy<B> {
         let candle_output = self.model.forward(&candle_input).ok()?;
 
         // Convert back to Burn tensor
-        candle_to_burn(&candle_output, &self.burn_device).ok()
+        let output = candle_to_burn(&candle_output, &self.burn_device).ok()?;
+
+        // DIAGNOSTIC: Log prediction pipeline complete
+        log::debug!("[POLICY] Prediction complete. Output tensor on Burn device");
+
+        Some(output)
     }
 }
 

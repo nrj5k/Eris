@@ -75,11 +75,18 @@ impl OptimusModel {
     /// # Returns
     /// Output tensor on same device
     pub fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
+        // DIAGNOSTIC: Log input device
+        log::debug!(
+            "[MODEL] Forward pass. Input device: {:?}, shape: {:?}",
+            x.device(),
+            x.dims()
+        );
+
         let result = self.inner.forward(x, None, false)?;
 
         // iTransformer returns Either<Vec<(usize, Tensor)>, f64>
         // Extract the first prediction tensor from the Vec variant
-        match result {
+        let output = match result {
             either::Either::Left(predictions) => predictions
                 .into_iter()
                 .next()
@@ -88,7 +95,16 @@ impl OptimusModel {
             either::Either::Right(_) => Err(candle_core::Error::Msg(
                 "Unexpected scalar result from iTransformer".to_string(),
             )),
-        }
+        }?;
+
+        // DIAGNOSTIC: Log output device
+        log::debug!(
+            "[MODEL] Forward pass complete. Output device: {:?}, shape: {:?}",
+            output.device(),
+            output.dims()
+        );
+
+        Ok(output)
     }
 
     /// Get config
@@ -159,5 +175,53 @@ mod tests {
         assert_eq!(dims[0], 1);
         assert_eq!(dims[1], config.pred_len);
         assert_eq!(dims[2], config.num_variates);
+    }
+
+    // DIAGNOSTIC: GPU test to verify tensors stay on GPU
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_model_on_gpu() {
+        // Try to create CUDA device
+        let device = match CandleDevice::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                log::warn!("CUDA device not available, skipping GPU test");
+                return;
+            }
+        };
+
+        let config = test_config();
+        let model = OptimusModel::new(&config, &device).expect("Failed to create model on GPU");
+
+        // Verify model is on GPU
+        assert!(model.is_gpu(), "Model should be on GPU");
+        assert_eq!(model.device_name(), "CUDA");
+
+        // Create input on GPU
+        let input = Tensor::zeros(
+            (1, config.lookback_len, config.num_variates),
+            candle_core::DType::F32,
+            model.device(),
+        )
+        .expect("Failed to create input tensor");
+
+        // Verify input is on GPU
+        assert!(
+            matches!(input.device(), CandleDevice::Cuda(0)),
+            "Input tensor should be on CUDA(0), got {:?}",
+            input.device()
+        );
+
+        // Run forward pass
+        let output = model.forward(&input).expect("Forward pass failed");
+
+        // Verify output is still on GPU
+        assert!(
+            matches!(output.device(), CandleDevice::Cuda(0)),
+            "Output tensor should be on CUDA(0), got {:?}",
+            output.device()
+        );
+
+        log::info!("GPU test passed: Model and tensors correctly on CUDA(0)");
     }
 }
