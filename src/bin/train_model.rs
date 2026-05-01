@@ -403,7 +403,7 @@ fn train_model_generic(args: &Args, device: Device) -> Result<(), String> {
     // Check if using Optimus (requires backend and optimus feature)
     #[cfg(feature = "optimus")]
     if matches!(args.model, ModelType::Optimus) {
-        return dispatch_training!(device, |B, dev| { run_optimus_training::<B>(args, dev) });
+        return dispatch_training!(device, |B, dev| run_optimus_training::<B>(args, dev));
     }
 
     // Use VecEnv for parallel environments if num_envs > 1
