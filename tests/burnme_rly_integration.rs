@@ -3,11 +3,7 @@
 
 #[cfg(test)]
 mod integration_tests {
-    use burnme_rly::{
-        should_train, train_step_with_warmup, BatchedActionSelector, DiscreteSpace, GpuTrainable,
-        GpuTrainingCoordinator, Info, StepResult, TensorTransitionBatch, TrainingConfig,
-        TrainingMetrics, Transition, VecEnvironment,
-    };
+    use burnme_rly::{should_train, DiscreteSpace, TrainingConfig, TrainingMetrics};
 
     #[test]
     fn test_types_are_accessible() {

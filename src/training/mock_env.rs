@@ -1,5 +1,6 @@
 use crate::env::{Environment, Info, StepResult};
 use crate::space::{BoxSpace, DiscreteSpace};
+#[allow(deprecated)]
 use crate::training::replay_buffer::Transition;
 
 /// Mock environment for testing without external dependencies.

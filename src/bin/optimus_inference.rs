@@ -83,7 +83,7 @@ mod optimus_impl {
         // Create policy - device auto-detected or overridden via --device flag
         let action_dim = 10;
         let mut policy =
-            OptimusPolicy::<B>::new(config.clone(), device, action_dim, args.device.as_deref());
+            OptimusPolicy::<B>::new(config.clone(), device.clone(), action_dim, args.device.as_deref());
 
         // Load checkpoint if exists
         let checkpoint_path = Path::new(&args.checkpoint);

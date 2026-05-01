@@ -2,14 +2,14 @@ use burn::backend::NdArray;
 use burn::tensor::Tensor;
 
 use eris::models::{
-    decode_action, encode_action, CombinedModel, CombinedModelConfig, ContextualBandit,
-    ContextualBanditConfig, QNetwork, QNetworkConfig,
+    decode_action, encode_action, CombinedModelConfig, ContextualBanditConfig, QNetworkConfig,
 };
 use eris::tier::Tier;
 use eris::TierConfig; // Old TierConfig from config_old
 
 type Backend = NdArray;
 
+#[allow(dead_code)]
 fn create_test_tier(id: u32, capacity: f64, name: &str) -> Tier {
     Tier::new(TierConfig {
         name: name.into(),

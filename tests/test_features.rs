@@ -171,7 +171,7 @@ fn test_blob_features_extraction() {
 
 #[test]
 fn test_blob_features_write_type() {
-    let mut tracker = AccessTracker::new(1000);
+    let tracker = AccessTracker::new(1000);
     let mut blob = create_test_blob("test");
     blob.io_op = "write".into();
 
@@ -181,7 +181,7 @@ fn test_blob_features_write_type() {
 
 #[test]
 fn test_blob_features_non_sequential() {
-    let mut tracker = AccessTracker::new(1000);
+    let tracker = AccessTracker::new(1000);
     let mut blob = create_test_blob("test");
     blob.is_sequence = false;
 
@@ -314,7 +314,7 @@ fn test_blob_features_reuse_distance_normalization() {
 
 #[test]
 fn test_blob_features_size_normalization() {
-    let mut tracker = AccessTracker::new(1000);
+    let tracker = AccessTracker::new(1000);
     let mut blob = create_test_blob("test");
     blob.offset_size = 5000.0; // Half of max_size
 
@@ -329,7 +329,7 @@ fn test_blob_features_size_normalization() {
 
 #[test]
 fn test_blob_features_overwrite_clamping() {
-    let mut tracker = AccessTracker::new(1000);
+    let tracker = AccessTracker::new(1000);
     let mut blob = create_test_blob("test");
 
     // Test value > 1

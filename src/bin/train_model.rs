@@ -444,8 +444,8 @@ fn run_training_vecenv<B: burn::tensor::backend::AutodiffBackend>(
         ));
     }
 
+    use burnme_rly::buffer::Transition;
     use eris::env::VecEnv;
-    use eris::training::Transition;
 
     let config_path = &args.config;
     let trace_path = &args.trace_file;

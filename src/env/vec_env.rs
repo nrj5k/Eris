@@ -438,8 +438,6 @@ impl BurnmeRlyVecEnvironment for VecEnv {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_vec_env_creation() {
         // This will fail without proper test setup, but structure is there

@@ -407,6 +407,7 @@ mod tests {
         let checkpoint_path = temp_dir.path();
 
         #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
         struct TestConfig {
             value: i32,
         }

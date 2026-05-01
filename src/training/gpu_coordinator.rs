@@ -689,8 +689,8 @@ impl GpuTrainingCoordinator {
 mod tests {
     use super::*;
     use burn::backend::{Autodiff, NdArray};
-    use burn::tensor::backend::Backend;
 
+    #[allow(dead_code)]
     type TestBackend = Autodiff<NdArray<f32>>;
 
     #[test]

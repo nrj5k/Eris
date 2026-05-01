@@ -449,6 +449,7 @@ mod tests {
     type TestBackend = Autodiff<NdArray<f32>>;
 
     // Mock implementation for testing
+    #[allow(dead_code)]
     struct MockPolicy {
         buffer: crate::training::HybridRingBuffer<TestBackend>,
         warmup_batch_size: usize,
@@ -555,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_effective_batch_size_warmup() {
-        let device = <NdArray as Backend>::Device::default();
+        let _device = <NdArray as Backend>::Device::default();
         let mut policy = MockPolicy::new(1000, 10);
         let full_batch_size = policy.full_batch_size();
         let warmup_batch_size = policy.warmup_batch_size();

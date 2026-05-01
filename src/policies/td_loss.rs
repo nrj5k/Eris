@@ -299,7 +299,7 @@ mod tests {
         let q_values = Tensor::from_data(TensorData::new(q_data, [batch_size, action_dim]), device);
 
         let target_data: Vec<f32> = (0..batch_size * action_dim)
-            .map(|i| (i as f32 * 0.05))
+            .map(|i| i as f32 * 0.05)
             .collect();
         let target_q = Tensor::from_data(
             TensorData::new(target_data, [batch_size, action_dim]),

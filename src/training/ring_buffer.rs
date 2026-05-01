@@ -1,5 +1,6 @@
 //! Ring buffer with O(1) index-based sampling for experience replay
 
+#[allow(deprecated)]
 use crate::training::Transition;
 use burn::data::dataset::Dataset;
 use rand::prelude::*;
