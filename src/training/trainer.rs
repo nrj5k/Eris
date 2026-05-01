@@ -37,7 +37,6 @@ use tracy_client::span;
 use crate::config::CombinedBanditDQNConfig;
 use crate::models::CombinedModel;
 use crate::training::checkpoint::{CheckpointMetadata, CheckpointMetadataExt};
-#[allow(deprecated)]
 use crate::training::replay_buffer::TransitionBatch;
 use crate::training::HybridRingBuffer;
 use crate::training::TensorTransitionBatch;
@@ -709,7 +708,6 @@ impl<B: AutodiffBackend> CombinedAgent<B> {
     /// # Note
     /// Gradient clipping is now handled by optimizer configuration via `with_grad_clipping()`.
     /// This method exists for compatibility but returns gradients unchanged.
-    #[allow(dead_code)]
     fn clip_gradients(&self, grads: GradientsParams, _max_norm: f32) -> GradientsParams {
         // Gradient clipping is handled by Adam's with_grad_clipping() configuration
         // Applied during optimizer.step() automatically

@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_feature_extraction_write() {
-        let tracker = AccessTracker::new(1000);
+        let mut tracker = AccessTracker::new(1000);
         let mut blob = create_test_blob("test");
         blob.io_op = "write".into();
 
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn test_feature_extraction_non_sequential() {
-        let tracker = AccessTracker::new(1000);
+        let mut tracker = AccessTracker::new(1000);
         let mut blob = create_test_blob("test");
         blob.is_sequence = false;
 
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_size_normalization() {
-        let tracker = AccessTracker::new(1000);
+        let mut tracker = AccessTracker::new(1000);
         let mut blob = create_test_blob("test");
         blob.offset_size = 5000.0; // Half of max_size
 
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_overwrite_amount_clamping() {
-        let tracker = AccessTracker::new(1000);
+        let mut tracker = AccessTracker::new(1000);
         let mut blob = create_test_blob("test");
 
         // Test values outside [0, 1]

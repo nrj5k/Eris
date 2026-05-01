@@ -1,7 +1,6 @@
 use burn::data::dataloader::batcher::Batcher;
 use burn::tensor::{backend::Backend, Int, Tensor, TensorData};
 
-#[allow(deprecated)]
 use crate::training::Transition;
 
 /// Batch of transitions as GPU tensors.

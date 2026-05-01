@@ -268,7 +268,7 @@ fn test_cache_policy_impl() {
     let dqn_config = create_test_dqn_config();
     let exploration = create_test_exploration_epsilon();
     let config = DQNExplorerConfig::new(dqn_config, exploration);
-    let policy = DQNPolicy::<TestBackend>::new(config, device);
+    let mut policy = DQNPolicy::<TestBackend>::new(config, device);
 
     // Test select_action
     let state = State::Features(vec![1.0; 15]);

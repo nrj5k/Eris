@@ -473,7 +473,7 @@ mod tests {
             done: false,
         }];
 
-        let (states, actions, _rewards, _next_states, _dones) =
+        let (states, actions, rewards, next_states, dones) =
             batch_to_tensors::<TestBackend>(&batch, 1, &device);
 
         assert_eq!(states.shape().dims, [1, 1]);

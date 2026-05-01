@@ -6,9 +6,10 @@
 //! For the newer generic model using SequentialCompose (stop-gradient,
 //! independent training), see `MetisModel` below.
 
-use burn::{config::Config, module::Module};
+use burn::{config::Config, module::Module, prelude::*};
 
 use burn::tensor::{backend::Backend, Tensor};
+use burnme_rly::models::ComposableModel;
 
 use crate::models::{
     compose_adapter::{BanditAdapter, DQNAdapter},

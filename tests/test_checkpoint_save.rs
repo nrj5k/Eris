@@ -1,6 +1,7 @@
 //! Test checkpoint saving for both policy and target models
 
 use burn::backend::{Autodiff, NdArray};
+use eris::config::CombinedBanditDQNConfig;
 use eris::model::ErisDefaults;
 use eris::training::{CombinedAgent, TrainingConfig};
 use tempfile::TempDir;

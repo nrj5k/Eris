@@ -27,7 +27,6 @@ cuda = [
   "burn/train",
   "burn/dataset",
   "burn/fusion",
-  "burnme-rly/cuda",
 ]
 rocm = [
   "burn/rocm",
@@ -45,10 +44,6 @@ parallel = ["rayon"]
 
 # SPIR-V support for wgpu (Vulkan targets with better performance)
 spirv = ["wgpu", "burn/ir"]
-
-# Optimus iTransformer feature
-# Note: CUDA is optional - use "optimus,cuda" for GPU support
-optimus = ["burnme-rly/optimus"]
 
 [dependencies]
 burnme-rly = { path = "burnme-rly" }
@@ -90,13 +85,3 @@ tempfile = "3.20"
 [[bench]]
 name = "batch_size_bench"
 harness = false
-
-[[bin]]
-name = "optimus_inference"
-path = "src/bin/optimus_inference.rs"
-required-features = ["optimus"]
-
-[[bin]]
-name = "train_optimus"
-path = "src/bin/train_optimus.rs"
-required-features = ["optimus"]

@@ -615,12 +615,12 @@ mod tests {
                 use rand::rng;
                 let mut rng = rng();
                 let action: usize = rng.random_range(0..10); // Random action
-                let (_obs, reward, _done) = env.step(action);
+                let (obs, reward, done) = env.step(action);
 
                 total_reward += reward;
                 steps += 1;
 
-                if _done {
+                if done {
                     break;
                 }
             }

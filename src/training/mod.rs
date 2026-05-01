@@ -1,9 +1,5 @@
 // AsyncDQNDataLoader removed - using Burn's MultiThreadDataLoader instead
 // pub mod async_dataloader;
-
-// Allow deprecated usage within this module - migration to burnme-rly buffers is ongoing
-#![allow(deprecated)]
-
 pub mod batched_action_utils;
 pub mod burn_callbacks;
 pub mod burn_dataloader;

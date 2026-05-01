@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex};
 
 use burn::tensor::{backend::Backend, Int, Tensor, TensorData};
 
-#[allow(deprecated)]
 use crate::training::{ReplayBuffer, Transition};
 
 /// DQN batch with tensors on device (GPU)

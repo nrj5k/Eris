@@ -15,12 +15,17 @@
 //! - 64MB thread stack (prevents stack overflow)
 //! - Box::new() for heap-allocated models
 
+use burn::tensor::TensorData;
 use clap::{Parser, ValueEnum};
+use eris::device::{available_backends, Device};
 #[cfg(feature = "cuda")]
 use eris::utils::is_gpu_backend;
-use std::path::PathBuf;
+use eris::utils::log_backend_info;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
+
+use eris::training::CombinedAgent;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, ValueEnum)]
 enum ModelType {
